@@ -1,11 +1,8 @@
+import resources as rc
 import cv2
 import numpy as np
 import pyautogui as pg
 import os
-
-#Directory Setup
-global installDirectory
-installDirectory = os.path.abspath('wizmatic').replace('\wizmatic\\','\\')
 
 def initImageLib():
     global images_cards
@@ -14,14 +11,14 @@ def initImageLib():
     images_cards = []
     images_buttons = []
 
-    directory = installDirectory + '\images\cards'
+    directory = rc.INSTALLDIR + '\images\cards'
     for filename in os.listdir(directory):
         f = os.path.join(directory, filename)
         # checking if it is a file
         if os.path.isfile(f):
             images_cards.append(directory + '\\' + filename)
 
-    directory = installDirectory + '\images\\buttons'
+    directory = rc.INSTALLDIR + '\images\\buttons'
     for filename in os.listdir(directory):
         f = os.path.join(directory, filename)
         # checking if it is a file
@@ -39,7 +36,7 @@ def viewScreen():
 def findCard(cardName):
 
     cardPos = [-1,-1]
-    cardPath = installDirectory + '\images\cards\\' + cardName + '.png'
+    cardPath = rc.INSTALLDIR + '\images\cards\\' + cardName + '.png'
     cardCenter = str(pg.locateCenterOnScreen(cardPath, confidence=0.9))
 
     if(cardCenter != 'None'):
@@ -53,7 +50,7 @@ def findCard(cardName):
 def findButton(buttonName):
 
     buttonPos = [-1,-1]
-    buttonPath = installDirectory + '\images\\buttons\\' + buttonName + '.png'
+    buttonPath = rc.INSTALLDIR + '\images\\buttons\\' + buttonName + '.png'
     buttonCenter = str(pg.locateCenterOnScreen(buttonPath, confidence=0.8))
 
     if(buttonCenter != 'None'):
