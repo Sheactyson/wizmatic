@@ -2,6 +2,8 @@ import requests
 import resources as rc
 from bs4 import BeautifulSoup
 from pprint import pprint
+import fnmatch
+import math
 
 def importPage(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36'}
@@ -23,8 +25,10 @@ def decodePage(inputName):
     #Get page HTML
     res.spellURL = rc.WIKIURL + '/wiki/Spell:' + res.originalName
     cardHTML = importPage(res.spellURL)
+    print(cardHTML)
 
     #Get card name
+    print(cardHTML.find(id='firstHeading'))
     res.cardName = str(cardHTML.find(id='firstHeading')).split('Spell:')[1].split('<')[0]
 
     if '^' in inputName:
@@ -82,9 +86,81 @@ def decodePage(inputName):
             break
 
     #Populate card values based on type
-    #for()
+    populateValues(res)
 
     return res
+
+def populateValues(card: rc.LibCard):
+    dList = str(card.desc).split(' ')
+    print(dList)
+    if(card.buffName != ""): #Apply buff values to card
+        buffCard = decodePage(card.buffName)
+        card.buffDamage   = buffCard.buffDamage
+        card.buffAccuracy = buffCard.buffAccuracy
+        card.buffPierce   = buffCard.buffPierce
+        card.buffHeal     = buffCard.buffHeal
+        card.buffPercent  = buffCard.buffPercent
+        card.buffProtect  = buffCard.buffProtect
+        card.buffDelay    = buffCard.buffDelay
+        card.addPips      = buffCard.addPips
+        card.buffCloak    = buffCard.buffCloak
+    for tp in card.type: #Iterate through each type assigned to the card
+        print(tp)
+        if(tp == 'Damage Spell'): #Damage Spell
+            for word in dList:
+                if(word == 'Deals'):
+                    value = dList[dList.index('Deals')+1]
+                    print(value)
+                    if('-' in value):
+                        card.minDamage = int(str(value).split('-')[0].replace(',',''))
+                        card.maxDamage = int(str(value).split('-')[1].replace(',',''))
+                    else:
+                        card.minDamage = int(value.replace(',',''))
+                        card.maxDamage = int(value.replace(',',''))
+        elif(tp == "Steal Spell"): #Steal Spell
+            for word in dList:
+                if(word == 'Deals'):
+                    value = dList[dList.index('Deals')+1]
+                    print(value)
+                    if('-' in value):
+                        card.minDamage = int(str(value).split('-')[0].replace(',',''))
+                        card.maxDamage = int(str(value).split('-')[1].replace(',',''))
+                    else:
+                        card.minDamage = int(value.replace(',',''))
+                        card.maxDamage = int(value.replace(',',''))
+                if(word == 'for'): #Sets the lifesteal amount
+                    next = dList[dList.index('for')+1]
+                    if(next == 'half'):
+                        multiplier = 0.5
+                    else:
+                        multiplier = int(str(next).replace('%',''))/100
+                    card.baseHeal = math.ceil(card.minDamage*multiplier)
+                    card.buffHeal = math.ceil(card.buffDamage*multiplier)
+        elif(tp == 'Enchantment Spell'): #Enchantment Spell
+            if(card.school == "Sun"):
+                if(card.cardName in rc.BUFFS_DAMAGE):
+                    value = str(card.desc).split('Damage')[0].replace('+','')
+                    card.buffDamage = int(value)
+                if(card.cardName in rc.BUFFS_ACCURACY):
+                    value = str(card.desc).split('%')[0].replace('+','')
+                    card.buffAccuracy = int(value)
+                    if('Piercing' in card.desc):
+                        value = str(card.desc).split('%')[1].split('+')[1]
+                        card.buffPierce = int(value)
+                if(card.cardName in rc.BUFFS_HEALING):
+                    value = str(card.desc).split('Healing')[0].replace('+','').replace(' ','')
+                    card.buffHeal = int(value)
+                if(card.cardName in rc.BUFFS_PERCENT):
+                    value = str(card.desc).split('%')[0].replace('+','')
+                    card.buffPercent = int(value)
+                if(card.cardName in rc.BUFFS_PROTECT):
+                    card.buffProtect = True
+                if(card.cardName in rc.BUFFS_DELAY):
+                    card.buffDelay = True
+                    card.addPips = 4
+                if(card.cardName == "Cloak"):
+                    card.buffCloak = True
+
 
 def printCardStatus(cardName):
     card = decodePage(cardName)
@@ -92,6 +168,4 @@ def printCardStatus(cardName):
     pprint(card_vars, sort_dicts=False)
     print('\n')
 
-printCardStatus('Ship_of_Fools^Epic')
-printCardStatus('Call_of_Khrulhu')
 printCardStatus('Ship_of_Fools')
