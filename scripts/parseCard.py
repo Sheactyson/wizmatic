@@ -128,6 +128,11 @@ def populateValues(card: rc.LibCard):
                     else:
                         card.minDamage = int(value.replace(',',''))
                         card.maxDamage = int(value.replace(',',''))
+                if(word == 'and' and 'Rounds' in dList): #DOT Spells
+                    value = int(dList[dList.index('and')+1])
+                    card.rounds = int(dList[dList.index('Rounds')-1])
+                    card.totalDOT = value + card.buffDamage
+                    card.roundDOT = math.floor(card.totalDOT/card.rounds)
         elif(tp == "Steal Spell"): #Steal Spell
             for word in dList:
                 if(word == 'Deals'):
@@ -179,4 +184,4 @@ def printCardStatus(cardName):
     pprint(card_vars, sort_dicts=False)
     print('\n')
 
-printCardStatus('Ship_of_Fools^Epic')
+printCardStatus('Fire_Elf^Epic')

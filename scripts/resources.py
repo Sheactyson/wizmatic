@@ -13,14 +13,17 @@ class LibCard:
         self.regularPipCost: int = 0
         self.schoolPipCost: int = 0
         self.shadowPipCost: int = 0
-
         self.baseAccuracy: int = 0
+
         self.minDamage: int = 0
         self.maxDamage: int = 0
         self.baseHeal: int = 0
         self.baseTake: int = 0
-        self.baseDOT: int = 0
-        self.baseHOT: int = 0
+        
+        self.totalDOT: int = 0
+        self.totalHOT: int = 0
+        self.roundDOT: int = 0
+        self.roundHOT: int = 0
         self.rounds: int = 0
         
         self.basePercent: int = 0
@@ -31,6 +34,8 @@ class LibCard:
         self.buffPierce: int = 0
         self.buffDamage: int = 0
         self.buffHeal: int = 0
+        self.buffRoundDOT: int = 0
+        self.buffRoundHOT: int = 0
         self.buffPercent: int = 0
         self.buffProtect: bool = False
         self.buffCloak: bool = False
