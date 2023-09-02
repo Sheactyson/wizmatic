@@ -5,13 +5,26 @@ from pprint import pprint
 import fnmatch
 import math
 
+Session_Active = False
+
+def startSession():
+    global ses
+    global Session_Active
+    ses = requests.Session()
+    ses.headers.update({'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36'})
+    Session_Active = True
+    print('Web Session Started')
+
 def importPage(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36'}
-    res = requests.get(url, headers=headers)
+    global ses
+    global Session_Active
+    if(Session_Active is False):
+        startSession()
+    res = ses.get(url)
     soup = BeautifulSoup(res.content, "html.parser")
     return soup
 
-def decodePage(inputName):
+def decodeSpell(inputName):
     res = rc.LibCard()
 
     #Determine buffs or not
@@ -25,10 +38,8 @@ def decodePage(inputName):
     #Get page HTML
     res.spellURL = rc.WIKIURL + '/wiki/Spell:' + res.originalName
     cardHTML = importPage(res.spellURL)
-    print(cardHTML)
 
     #Get card name
-    print(cardHTML.find(id='firstHeading'))
     res.cardName = str(cardHTML.find(id='firstHeading')).split('Spell:')[1].split('<')[0]
 
     if '^' in inputName:
@@ -94,7 +105,7 @@ def populateValues(card: rc.LibCard):
     dList = str(card.desc).split(' ')
     print(dList)
     if(card.buffName != ""): #Apply buff values to card
-        buffCard = decodePage(card.buffName)
+        buffCard = decodeSpell(card.buffName)
         card.buffDamage   = buffCard.buffDamage
         card.buffAccuracy = buffCard.buffAccuracy
         card.buffPierce   = buffCard.buffPierce
@@ -163,9 +174,9 @@ def populateValues(card: rc.LibCard):
 
 
 def printCardStatus(cardName):
-    card = decodePage(cardName)
+    card = decodeSpell(cardName)
     card_vars = vars(card)
     pprint(card_vars, sort_dicts=False)
     print('\n')
 
-printCardStatus('Ship_of_Fools')
+printCardStatus('Ship_of_Fools^Epic')
