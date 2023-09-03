@@ -1,0 +1,177 @@
+/* CSS Document */
+
+body {
+	
+}
+
+.wrapper1 {
+
+/*	min-width: 1150px; */
+	min-width: 1310px;
+	text-align: left;
+	width: 95%;
+	margin: 0 auto;
+    margin-top:15px;
+	padding-top: 0;
+	padding-right: 0;
+	padding-bottom: 0;
+	padding-left: 0;
+	position:relative;
+}
+
+.buttongreen {
+	z-index:9995;
+	display:block;
+	position:absolute;
+	top:-16px;
+	left:25px;  
+	overflow:hidden;
+	width:120px;
+	height:121px;
+	background-image:url(play-wizard101-120.png);
+	background-repeat:no-repeat;
+	background-position:0 0;
+}
+
+.buttongreen:hover {
+	text-decoration:none;
+	background-position:0 -121px;
+}
+
+.buttongreen span {
+	margin-left:25px;
+	text-align:center;
+	display:block;
+}
+
+.hbutton1 {
+	visibility:hidden;
+}
+
+
+/* header */
+.headerwrap{	
+
+	height: 89px;
+	position:relative;
+	width: 100%;
+    z-index:11;
+}
+
+
+.headerL {
+	height: 89px;
+    float: left;
+    width: 147px;
+    background-image: url(w101c-wiki_headerL.png);
+    background-repeat: no-repeat;
+}
+.headerC {
+	height: 89px;
+    background-image: url(w101c-wiki_headerbg.png);
+    background-repeat: repeat-x;
+    background-position: left top;
+    margin-top: 0;
+    margin-right: 134px;
+    margin-bottom: 0;
+    margin-left: 147px;
+}
+
+.headerR {
+	height: 89px;
+    float: right;
+    width: 134px;
+    background-image: url(w101c-wiki_headerR.png);
+    background-repeat: no-repeat;
+}
+
+
+/* CONTENT - cara ni je expand vertical div dgn background,lansung takde float */
+
+
+.contentL {
+    width:100%;
+    background-repeat:repeat-y;
+    background-image: url(w101c-wiki_leftbg.png);
+}
+
+.contentR {
+    background-repeat:repeat-y;
+    background-position:right top;
+    background-image: url(w101c-wiki_rightbg.png);
+    padding-top: 0;
+    padding-right: 61px;
+    padding-bottom: 0;
+    padding-left: 61px;
+}
+
+.contentC {
+
+    width:100%;
+    background-image: url(w101c-wiki_cbg.png);
+    background-repeat: repeat;
+}
+
+
+
+/* footerwrap */
+.footwrap{
+
+	height: 89px;
+	position:relative;
+	width: 100%;
+}
+.footL {
+   
+    height: 89px;
+    float: left;
+    width: 147px;
+    background-image: url(w101c-wiki_footerL.png);
+    background-repeat: no-repeat;
+}
+.footC{
+    height: 89px;
+    background-image: url(w101c-wiki_footerbg.png);
+    background-repeat: repeat-x;
+    margin-top: 0;
+    margin-right: 134px;
+    margin-bottom: 0;
+    margin-left: 147px;
+}
+
+.footR {
+    height: 89px;
+    float: right;
+    width: 134px;
+    background-image: url(w101c-wiki_footerR.png);
+    background-repeat: no-repeat;
+}
+
+.footer_morecopyright {
+	padding-bottom:5px;
+	color:rgb(204, 204, 204);
+	font:  normal 11px Tahoma, Calibri, Verdana, Geneva, sans-serif;
+	margin-top: 10px;
+	text-align:center;
+	display:block;
+}
+
+.moreprivacy {
+/*	padding-bottom:5px; */
+/*	color:rgb(204, 204, 204); */
+	font:  normal 12px Tahoma, Calibri, Verdana, Geneva, sans-serif;
+	display:block;
+}
+
+/* ***** define Wizard101 font face *****yep */
+@font-face {
+    font-family: 'WizardRegular';
+    src: url('/fonts/wizard_fancy-webfont.eot');
+    src: url('/fonts/wizard_fancy-webfont.eot?#iefix') format('embedded-opentype'),
+         url('/fonts/wizard_fancy-webfont.woff') format('woff'),
+         url('/fonts/wizard_fancy-webfont.ttf') format('truetype'),
+         url('/fonts/wizard_fancy-webfont.svg#WizardRegular') format('svg');
+    font-weight: normal;
+    font-style: normal;
+}
+

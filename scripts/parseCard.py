@@ -2,8 +2,10 @@ import requests
 import resources as rc
 from bs4 import BeautifulSoup
 from pprint import pprint
-import fnmatch
 import math
+import json
+import os
+import cv2
 
 Session_Active = False
 
@@ -21,58 +23,58 @@ def importPage(url):
     if(Session_Active is False):
         startSession()
     res = ses.get(url)
-    soup = BeautifulSoup(res.content, "html.parser")
+    soup = BeautifulSoup(res.content, 'html.parser')
     return soup
 
-def decodeSpell(inputName):
+def importLocal(inputName):
+    filepath = rc.INSTALLDIR + '\\html\\' + inputName + ' - Wizard101 Wiki.html'
+    with open(filepath) as fp:
+        soup = BeautifulSoup(fp, 'html.parser')
+    return soup
+
+def decodeSpell(inputName): #Modified for local, since pulling from web scraper is not working
     res = rc.LibCard()
 
-    #Determine buffs or not
-    if '^' in inputName:
-        res.originalName = inputName.split('^')[0]
-        res.buffName = inputName.split('^')[1]
-    else:
-        res.originalName = inputName
-        res.buffName = ''
+    #Get card name
+    res.cardName = inputName
 
     #Get page HTML
-    res.spellURL = rc.WIKIURL + '/wiki/Spell:' + res.originalName
-    cardHTML = importPage(res.spellURL)
-
-    #Get card name
-    res.cardName = str(cardHTML.find(id='firstHeading')).split('Spell:')[1].split('<')[0]
-
-    if '^' in inputName:
-        res.cardName = res.cardName + '^' + res.buffName
+    res.spellURL = rc.WIKIURL + '/wiki/Spell:' + str(res.cardName).replace(' ','_')
+    #cardHTML = importPage(res.spellURL)
+    cardHTML = importLocal('Spell_' + res.cardName)
 
     #iterate through images
-    iURL_found = False
+    iPath_found = False
     school_found = False
     shadowPip_found = False
     allImages = cardHTML.find_all('a', class_='image')
     for ele in allImages:
-        #Get url of image on wiki
-        if(iURL_found is False and res.originalName in str(ele) and res.buffName in str(ele)):
-            res.imgURL = rc.WIKIURL + str(ele).split('src=\"')[1].split('\"')[0]
-            iURL_found  = True
+        #Get path of image in files
+        if(iPath_found is False and res.cardName in str(ele)):
+            res.imgPath = '\\images\\cards\\' + res.cardName + '\\' + res.cardName + '.png'
+            iPath_found  = True
         #Get school of card
         elif(school_found is False and any(sch in str(ele) for sch in rc.SCHOOLS)):
             res.school = str(ele).split('(Icon) ')[1].split('.')[0]
             school_found = True
         #Get pip cost
         elif('Pip' in str(ele)):
-            if('Shadow' in str(ele)):
-                res.shadowPipCost = str(ele.parent.text).strip()
+            modEle = str(ele)
+            if('src' in str(ele)): #Accounts for locally stored html issue
+                modEle = str(ele).split('src')[0]
+
+            if('Shadow' in modEle):
+                res.shadowPipCost = int(str(ele.parent.text).strip())
                 shadowPip_found = True
-            elif(shadowPip_found is False and any(sch in str(ele) for sch in rc.SCHOOLS)):
-                res.schoolPipCost = str(ele.parent.text).strip()
+            elif(shadowPip_found is False and any(sch in modEle for sch in rc.SCHOOLS)):
+                res.schoolPipCost = int(str(ele.parent.text).strip())
             else:
                 regularPipCost = str(ele.parent.text).strip()
             
-            if(regularPipCost == "X"): #Account for all pips spells
+            if(regularPipCost == "X"): #Accounts for all pips spells
                 res.regularPipCost = -1
             else:
-                res.regularPipCost = regularPipCost
+                res.regularPipCost = int(regularPipCost)
         #Get type
         elif(any(icn in str(ele) for icn in rc.SPELL_TYPE_ICONS)):
             res.type.append(str(ele).split('title=\"')[1].split('\"')[0])
@@ -93,7 +95,7 @@ def decodeSpell(inputName):
             desc_found = True
             continue
         elif(desc_found):         
-            res.desc = str(ele).split('>')[1].split('<')[0]
+            res.desc = str(ele).split('>')[1].split('<')[0].rstrip()
             break
 
     #Populate card values based on type
@@ -103,25 +105,11 @@ def decodeSpell(inputName):
 
 def populateValues(card: rc.LibCard):
     dList = str(card.desc).split(' ')
-    print(dList)
-    if(card.buffName != ""): #Apply buff values to card
-        buffCard = decodeSpell(card.buffName)
-        card.buffDamage   = buffCard.buffDamage
-        card.buffAccuracy = buffCard.buffAccuracy
-        card.buffPierce   = buffCard.buffPierce
-        card.buffHeal     = buffCard.buffHeal
-        card.buffPercent  = buffCard.buffPercent
-        card.buffProtect  = buffCard.buffProtect
-        card.buffDelay    = buffCard.buffDelay
-        card.addPips      = buffCard.addPips
-        card.buffCloak    = buffCard.buffCloak
     for tp in card.type: #Iterate through each type assigned to the card
-        print(tp)
         if(tp == 'Damage Spell'): #Damage Spell
             for word in dList:
                 if(word == 'Deals'):
                     value = dList[dList.index('Deals')+1]
-                    print(value)
                     if('-' in value):
                         card.minDamage = int(str(value).split('-')[0].replace(',',''))
                         card.maxDamage = int(str(value).split('-')[1].replace(',',''))
@@ -131,13 +119,12 @@ def populateValues(card: rc.LibCard):
                 if(word == 'and' and 'Rounds' in dList): #DOT Spells
                     value = int(dList[dList.index('and')+1])
                     card.rounds = int(dList[dList.index('Rounds')-1])
-                    card.totalDOT = value + card.buffDamage
+                    card.totalDOT = value
                     card.roundDOT = math.floor(card.totalDOT/card.rounds)
         elif(tp == "Steal Spell"): #Steal Spell
             for word in dList:
                 if(word == 'Deals'):
                     value = dList[dList.index('Deals')+1]
-                    print(value)
                     if('-' in value):
                         card.minDamage = int(str(value).split('-')[0].replace(',',''))
                         card.maxDamage = int(str(value).split('-')[1].replace(',',''))
@@ -151,7 +138,6 @@ def populateValues(card: rc.LibCard):
                     else:
                         multiplier = int(str(next).replace('%',''))/100
                     card.baseHeal = math.ceil(card.minDamage*multiplier)
-                    card.buffHeal = math.ceil(card.buffDamage*multiplier)
         elif(tp == 'Enchantment Spell'): #Enchantment Spell
             if(card.school == "Sun"):
                 if(card.cardName in rc.BUFFS_DAMAGE):
@@ -177,6 +163,38 @@ def populateValues(card: rc.LibCard):
                 if(card.cardName == "Cloak"):
                     card.buffCloak = True
 
+def extractCardImagesFromHtmlDirectory(cardName):
+    saveLocation = str(rc.INSTALLDIR) + '\\images\\cards\\' + cardName
+    directory = str(rc.INSTALLDIR) + '\\html\\Spell_' + cardName + ' - Wizard101 Wiki_files'
+
+    #Setup new directory
+    os.chdir(str(rc.INSTALLDIR) + '\\images\\cards')
+    try:
+        os.mkdir(saveLocation)
+        os.chdir(saveLocation)
+    except:
+        os.chdir(saveLocation)
+    
+    #Find and save necessary files
+    for filename in os.listdir(directory):
+        modName = str(filename) #Create modifiable filename
+        if('(Spell)_'+str(cardName).replace(' ','_') in filename and '117px' not in filename and 'Tier' not in filename):
+            #Remove pixel description
+            if('px' in modName):
+                modName = modName.split('px-')[1]
+            #Reformat original name
+            fromRep = '(Spell)_'+str(cardName).replace(' ','_')
+            toRep = cardName
+            modName = modName.replace(fromRep, toRep)
+            #Reformat buff name
+            if('(' in modName):
+                modName = modName.replace('_(','^').replace('_',' ').replace(')','')
+            #Save image
+            imgPath = str(directory + '\\' + filename)
+            img = cv2.imread(imgPath)
+            dim = (83, 127)
+            scaledImg = cv2.resize(img, dim, interpolation = cv2.INTER_AREA)
+            cv2.imwrite(modName, scaledImg)
 
 def printCardStatus(cardName):
     card = decodeSpell(cardName)
@@ -184,4 +202,28 @@ def printCardStatus(cardName):
     pprint(card_vars, sort_dicts=False)
     print('\n')
 
-printCardStatus('Fire_Elf^Epic')
+def populateCardsFromHtml(keep=False):
+    #Setup cards based on html directory
+    directory = str(rc.INSTALLDIR) + '\\html'
+    fileLocation = str(rc.INSTALLDIR) + '\\images\\cards\\LibCards.json'
+    jsonFile = open(fileLocation, 'w')
+    data_final = []
+
+    for filename in os.listdir(directory):
+        if('.html' in filename):
+            modName = str(filename).split(' - ')[0].split('Spell_')[1]
+            extractCardImagesFromHtmlDirectory(modName)
+            card = decodeSpell(modName)
+            jsonObj = json.dumps(card.__dict__)
+            jsonDict = json.loads(jsonObj)
+            data_final.append({modName: jsonDict})
+
+    json.dump(data_final, jsonFile, ensure_ascii=False, indent=2)
+    jsonFile.close()
+
+#outputCardJson('Fire Elf')
+#extractCardImagesFromHtmlDirectory('Fire Elf')
+#outputCardJson('Ship of Fools')
+#extractCardImagesFromHtmlDirectory('Ship of Fools')
+
+populateCardsFromHtml(keep=True)

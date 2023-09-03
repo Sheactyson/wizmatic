@@ -3,47 +3,35 @@ import cv2
 import numpy as np
 import pyautogui as pg
 import os
+import json
+import time
 
-def initImageLib():
-    global images_cards
-    global images_buttons
+def initLibCards():
+    global lib_cards
+    filepath = str(rc.INSTALLDIR) + '\\images\\cards\\LibCards.json'
 
-    images_cards = []
-    images_buttons = []
+    with open(filepath) as jsonFile:
+        lib_cards = json.load(jsonFile)
 
-    directory = rc.INSTALLDIR + '\images\cards'
-    for filename in os.listdir(directory):
-        f = os.path.join(directory, filename)
-        # checking if it is a file
-        if os.path.isfile(f):
-            images_cards.append(directory + '\\' + filename)
-
-    directory = rc.INSTALLDIR + '\images\\buttons'
-    for filename in os.listdir(directory):
-        f = os.path.join(directory, filename)
-        # checking if it is a file
-        if os.path.isfile(f):
-            images_buttons.append(directory + '\\' + filename)
-
-
-def viewScreen():
-    global screenshot
-
-    screenshot = pg.screenshot()
-    screenshot = cv2.cvtColor(np.array(screenshot),cv2.COLOR_RGB2BGR)
-
-
-def findCard(cardName):
-
+def findCard(cardName, buffName=''):
     cardPos = [-1,-1]
-    cardPath = rc.INSTALLDIR + '\images\cards\\' + cardName + '.png'
-    cardCenter = str(pg.locateCenterOnScreen(cardPath, confidence=0.9))
+    
+    if(buffName != ''):
+        cardPath = rc.INSTALLDIR + '\\images\\cards\\' + cardName + '\\' + cardName + '^' + buffName + '.png'
+    else:
+        cardPath = rc.INSTALLDIR + '\\images\\cards\\' + cardName + '\\' + cardName + '.png'
+
+    cardCenter = str(pg.locateCenterOnScreen(cardPath, confidence=0.8))
 
     if(cardCenter != 'None'):
         cardCenter = cardCenter.replace('Point(x=','').replace(',','').replace('y=','').replace(')','')
         cardPos[0] = cardCenter.split(' ')[0]
         cardPos[1] = cardCenter.split(' ')[1]
-        print(cardName + ' located at: ' + str(cardPos))
+
+        if(buffName != ''):
+            print(cardName + '^' + buffName + ' located at: ' + str(cardPos))
+        else:
+            print(cardName + ' located at: ' + str(cardPos))
     
     return cardPos
 
@@ -62,33 +50,40 @@ def findButton(buttonName):
 
     return buttonPos
 
-def useCard(cardName):
+def useCard(cardName, buffName=''):
     i = 0
     loop = 1
-    if('_epic' in cardName):
+    #If it is buffed, might not capture the card correctly first time and need to try multiple times(5)
+    if(buffName != ''):
         loop = 5
+        cardUsed = False
 
-    while(i < loop):
-        viewScreen()
+    while(i < loop and cardUsed is False):
         card1 = [-1,-1]
         
-        card1 = findCard(cardName)
+        card1 = findCard(cardName, buffName)
         if(card1[0] != -1):
-            print('Using card ' + cardName + '...')
+            if(buffName != ''):
+                print('Using card ' + cardName + '^' + buffName + '...')
+            else:
+                print('Using card ' + cardName + '...')
             pg.moveTo(int(card1[0]), int(card1[1]), duration = 0.5)
             pg.click()
             pg.moveRel(0, 200, duration = 0.2)
+            cardUsed = True
+        else:
+            if(buffName != ''):
+                print(cardName + '^' + buffName + ' not found')
+            else:
+                print(cardName + ' not found')
 
         i+=1
 
 def buffCard(cardName1, cardName2, availability=1):
-    viewScreen()
     card1 = [-1,-1]
     card2 = [-1,-1]
-    card1_nopips = [-1,-1]
 
     card1 = findCard(cardName1)
-    card1_nopips = findCard(cardName1 + '_nopips')
     if(card1[0] != -1):
         card2 = findCard(cardName2)
         if(card2[0] != -1):
@@ -100,7 +95,9 @@ def buffCard(cardName1, cardName2, availability=1):
             print(cardName1 + ' buffed with ' + cardName2)
         else:
             print('Buff ' + cardName2 + ' unavailable!')
-    elif((card1_nopips[0] != -1) and (availability == 0)):
+    else:
+        print(cardName1 + ' NOT buffed with ' + cardName2)
+    '''elif(availability == 0):
         card2 = findCard(cardName2)
         if(card2[0] != -1):
             pg.moveTo(int(card2[0]), int(card2[1]), duration = 0.5)
@@ -110,12 +107,9 @@ def buffCard(cardName1, cardName2, availability=1):
             pg.moveRel(0, 200, duration = 0.2)
             print(cardName1 + ' buffed with ' + cardName2 + ' (av=0)')
         else:
-            print('Buff ' + cardName2 + ' unavailable!')
-    else:
-        return
+            print('Buff ' + cardName2 + ' unavailable!')'''
 
 def clickButton(buttonName):
-    viewScreen()
     button1 = [-1,-1]
 
     button1 = findButton(buttonName)
@@ -126,7 +120,6 @@ def clickButton(buttonName):
         pg.moveRel(0, 200, duration = 0.2)
 
 def resetFocus():
-    viewScreen()
     reset = [-1,-1]
 
     reset = findButton('friendslist')
@@ -137,7 +130,6 @@ def resetFocus():
         pg.click()
 
 def inBattle():
-    viewScreen()
     battle = [-1,-1]
 
     battle = findButton('pass')
@@ -147,16 +139,12 @@ def inBattle():
     else:
         return False
 
-initImageLib()
+initLibCards()
 while(True):
     if(inBattle()):
         resetFocus()
         
-        useCard('massdeathprism')
-
-        buffCard('callofkhrulhu','epic')
-        buffCard('scarecrow','epic')
-        useCard('callofkhrulhu_epic')
-        useCard('scarecrow_epic')
+        buffCard('Ship of Fools','Epic')
+        useCard('Ship of Fools','Epic')
 
         clickButton('pass')
