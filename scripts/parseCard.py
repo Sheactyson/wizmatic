@@ -28,8 +28,8 @@ def importPage(url):
 
 def importLocal(inputName):
     filepath = rc.INSTALLDIR + '\\html\\' + inputName + ' - Wizard101 Wiki.html'
-    with open(filepath) as fp:
-        soup = BeautifulSoup(fp, 'html.parser')
+    with open(filepath, encoding='utf8') as fp:
+        soup = BeautifulSoup(fp, 'html5lib')
     return soup
 
 def decodeSpell(inputName): #Modified for local, since pulling from web scraper is not working
@@ -220,10 +220,3 @@ def populateCardsFromHtml(keep=False):
 
     json.dump(data_final, jsonFile, ensure_ascii=False, indent=2)
     jsonFile.close()
-
-#outputCardJson('Fire Elf')
-#extractCardImagesFromHtmlDirectory('Fire Elf')
-#outputCardJson('Ship of Fools')
-#extractCardImagesFromHtmlDirectory('Ship of Fools')
-
-populateCardsFromHtml(keep=True)

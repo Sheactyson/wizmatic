@@ -1,5 +1,13 @@
 import os
 
+#Formatting constants
+TAB1 = '    '
+TAB2 = '        '
+TAB3 = '            '
+TAB4 = '                '
+TAB5 = '                    '
+
+#Class used for parsing cards from wiki
 class LibCard:
     def __init__(self):
         self.cardName: str = "None"
@@ -40,10 +48,12 @@ class LibCard:
         self.buffDelay: bool
         self.addPips: int
 
-
+#Important links/paths
 INSTALLDIR = os.path.abspath('wizmatic').replace('\wizmatic\\','\\')
 WIKIURL = 'https://wizard101central.com'
 
+
+#Categories of in-game content
 SCHOOLS = ['Fire','Ice','Storm','Balance','Myth','Death','Life','Star','Sun','Moon','Shadow']
 SPELL_TYPE_ICONS = ['Damage Spell','Healing Spell','Charm Spell','Aura Spell','Enchantment Spell','Polymorph Spell','Shadow Self Spell','Shadow Creature Spell','All Enemies Spell','Steal Spell','Ward Spell','Global Spell','Manipulation Spell','Mutate Spell']
 BUFFS_ALL = ['Strong','Giant','Monstrous','Gargantuan','Colossal','Epic','Keen Eyes','Accurate','Sniper','Unstoppable','Extraordinary','Primordial','Radical','Sharpened Blade','Potent Trap','Aegis','Indemnity','Daybreaker','Nightbringer']
@@ -53,3 +63,10 @@ BUFFS_HEALING = ['Primordial','Radical']
 BUFFS_PERCENT = ['Sharpened Blade','Potent Trap']
 BUFFS_PROTECT = ['Aegis','Indemnity']
 BUFFS_DELAY = ['Daybreaker','Nightbringer']
+
+#Locations of regions on 1920x1080 screen
+DUEL_SLOT = [(94,1,232,116),(519,1,232,116),(945,1,232,116),(1370,1,232,116), #Located on screen in this
+             (211,906,232,165),(627,906,232,165),(1043,906,232,165),(1459,906,232,165)] #orientation
+HEALTH_REG = (21,935,127,33)
+MANA_REG   = (118,979,89,33)
+ENERGY_REG = (62,1001,61,28)

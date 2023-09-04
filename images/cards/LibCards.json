@@ -1,5 +1,19 @@
 [
   {
+    "Deathblade": {
+      "cardName": "Deathblade",
+      "type": [
+        "Charm Spell"
+      ],
+      "desc": "Applies a +35% Death Damage or Steal Charm",
+      "spellURL": "https://wizard101central.com/wiki/Spell:Deathblade",
+      "imgPath": "\\images\\cards\\Deathblade\\Deathblade.png",
+      "school": "Death",
+      "regularPipCost": 0,
+      "baseAccuracy": 100
+    }
+  },
+  {
     "Epic": {
       "cardName": "Epic",
       "type": [
@@ -34,6 +48,23 @@
     }
   },
   {
+    "Humongofrog": {
+      "cardName": "Humongofrog",
+      "type": [
+        "Damage Spell",
+        "All Enemies Spell"
+      ],
+      "desc": "Deals 275-315 Myth Damage to all enemies",
+      "spellURL": "https://wizard101central.com/wiki/Spell:Humongofrog",
+      "imgPath": "\\images\\cards\\Humongofrog\\Humongofrog.png",
+      "school": "Myth",
+      "regularPipCost": 4,
+      "baseAccuracy": 80,
+      "minDamage": 275,
+      "maxDamage": 315
+    }
+  },
+  {
     "Ship of Fools": {
       "cardName": "Ship of Fools",
       "type": [
@@ -50,6 +81,23 @@
       "minDamage": 300,
       "maxDamage": 300,
       "baseHeal": 150
+    }
+  },
+  {
+    "Vampire": {
+      "cardName": "Vampire",
+      "type": [
+        "Steal Spell"
+      ],
+      "desc": "Deals 335 Death Drain Damage and heals the caster for half the Damage dealt",
+      "spellURL": "https://wizard101central.com/wiki/Spell:Vampire",
+      "imgPath": "\\images\\cards\\Vampire\\Vampire.png",
+      "school": "Death",
+      "regularPipCost": 4,
+      "baseAccuracy": 85,
+      "minDamage": 335,
+      "maxDamage": 335,
+      "baseHeal": 168
     }
   }
 ]
