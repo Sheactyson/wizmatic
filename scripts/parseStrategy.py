@@ -51,9 +51,12 @@ def parse(stratName):
     outStr += rc.TAB2+   'while(lc.battleInstance()):\n'
     outStr += rc.TAB3+      'if(battleStarted is False):\n'
     outStr += rc.TAB4+         'print(\'battleInstance() = True, initiating battle\')\n'
+    outStr += rc.TAB4+         'lc.findWindowLocation()\n'
+    outStr += rc.TAB4+         'GS = lc.initGameState()\n'
     outStr += rc.TAB4+         'battleStarted = True\n\n'
 
     outStr += rc.TAB3+      'if(lc.cardSelection()):\n'
+    outStr += rc.TAB4+         'print(\'cardSelection() = True, initiating strategy\')\n'
     outStr += rc.TAB4+         'lc.findWindowLocation()\n'
     outStr += rc.TAB4+         'lc.resetFocus()\n'
 

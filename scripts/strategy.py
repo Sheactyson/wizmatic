@@ -9,9 +9,12 @@ def run():
         while(lc.battleInstance()):
             if(battleStarted is False):
                 print('battleInstance() = True, initiating battle')
+                lc.findWindowLocation()
+                GS = lc.initGameState()
                 battleStarted = True
 
             if(lc.cardSelection()):
+                print('cardSelection() = True, initiating strategy')
                 lc.findWindowLocation()
                 lc.resetFocus()
 

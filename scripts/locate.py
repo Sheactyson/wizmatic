@@ -1,9 +1,11 @@
 import resources as rc
 import cv2
+import pytesseract
 import numpy as np
 import pyautogui as pg
 import json
 
+#Startup functions
 def initLibCards():
     global lib_cards
     filepath = str(rc.INSTALLDIR) + '\\images\\cards\\LibCards.json'
@@ -11,10 +13,34 @@ def initLibCards():
     with open(filepath) as jsonFile:
         lib_cards = json.load(jsonFile)
 
+#View functions
 def viewScreen():
     global screenshot
     screenshot = pg.screenshot()
     screenshot = cv2.cvtColor(np.array(screenshot),cv2.COLOR_RGB2BGR)
+
+def viewWindow():
+    global windowshot
+    windowshot = pg.screenshot(region=(zeroPixel_left,zeroPixel_top,1920,1080))
+    windowshot = cv2.cvtColor(np.array(windowshot),cv2.COLOR_RGB2BGR)
+    #writepath = rc.INSTALLDIR + '\\images\\windowshot.png'
+    #cv2.imwrite(writepath, windowshot)
+
+def viewRegion(reg):
+    left = reg[0]
+    right = reg[0]+reg[2]
+    top = reg[1]
+    bottom = reg[1]+reg[3]
+    regionshot = windowshot[top:bottom, left:right]
+    writepath = rc.INSTALLDIR + '\\images\\gamestate\\regionshot.png'
+    cv2.imwrite(writepath, regionshot)
+    return regionshot
+
+#Utility functions
+def resetFocus():
+    print('Resetting window focus...')
+    pg.moveTo(zeroPixel_left+960, zeroPixel_top+200, duration = 0.1)
+    pg.click()
 
 def findWindowLocation():
     global zeroPixel_left
@@ -28,28 +54,28 @@ def findWindowLocation():
     else:
         print('Window location not found')
 
-def viewWindow():
-    global windowshot
-    windowshot = pg.screenshot(region=(zeroPixel_left,zeroPixel_top,1920,1080))
-    windowshot = cv2.cvtColor(np.array(windowshot),cv2.COLOR_RGB2BGR)
-    writepath = rc.INSTALLDIR + '\\images\\windowshot.png'
-    cv2.imwrite(writepath, windowshot)
+def extractText(imageName, reg=(-1,-1,-1,-1)):
+    pytesseract.pytesseract.tesseract_cmd = rc.TESSPATH
+    img = cv2.imread(imageName)
+    
+    if(reg[0]!=-1):
+        left = reg[0]
+        right = reg[0]+reg[2]
+        top = reg[1]
+        bottom = reg[1]+reg[3]
+        img = img[top:bottom, left:right]
+       
+    gray = cv2.cvtColor(img,cv2.COLOR_RGB2GRAY)
 
-def viewRegion(reg):
-    left = reg[0]
-    right = reg[0]+reg[2]
-    top = reg[1]
-    bottom = reg[1]+reg[3]
-    regionshot = windowshot[top:bottom, left:right]
-    writepath = rc.INSTALLDIR + '\\images\\regionshot.png'
-    cv2.imwrite(writepath, regionshot)
-    return regionshot
+    text = pytesseract.image_to_string(img)
+    if(text == ""):
+        text = pytesseract.image_to_string(gray)
 
-def resetFocus():
-    print('Resetting window focus...')
-    pg.moveTo(zeroPixel_left+960, zeroPixel_top+200, duration = 0.1)
-    pg.click()
+    text = str(text).strip().replace('‘','').replace(',','').replace('\n','').replace('\'','').replace('-','').replace(':','')
+    
+    return text
 
+#Find functions
 def battleInstance():
     battle = [-1,-1]
 
@@ -64,7 +90,6 @@ def cardSelection():
 
     battle = findButton('pass')
     if(battle[0] != -1):
-        print('cardSelection() = True, initiating strategy')
         return True
     else:
         return False 
@@ -106,6 +131,30 @@ def findButton(buttonName):
 
     return buttonPos
 
+def initiative():
+    firstPath = rc.INSTALLDIR + '\\images\\gamestate\\opponentFirst.png'
+    firstCenter = str(pg.locateCenterOnScreen(firstPath, confidence=0.8))
+
+    if(firstCenter != 'None'):
+        print('Opponents have initiative')
+        first = 'oppo'
+    else: 
+        print('Allies have initiative')
+        first = 'ally'
+
+    return first
+
+def isSlotActive(slot):
+    slotPath = rc.INSTALLDIR + '\\images\\gamestate\\slot'+str(slot)+'.png'
+    slotCenter = str(pg.locateCenterOnScreen(slotPath, confidence=0.7))
+
+    if(slotCenter != 'None'):
+        print('Slot'+str(slot)+' is occupied')
+        return True
+    else: 
+        return False
+
+#Interaction functions
 def useCard(cardName, buffName='', target=-1):
     cardName = cardName.replace('_',' ')
     buffName = buffName.replace('_',' ')
@@ -187,3 +236,53 @@ def clickDuelSlot(slot):
     pg.moveTo(int(slotLoc[0])+zeroPixel_left, int(slotLoc[1])+zeroPixel_top, duration = 0.6)
     pg.click()
     pg.moveTo(zeroPixel_left+960, zeroPixel_top+200, duration = 0.1)
+
+#Gamestate functions
+def initGameState():
+    GS = rc.GameState() 
+
+    while(cardSelection() == False): #wait until information is available
+        continue
+    else:
+        GS.initiative = initiative()
+        for slot in range(8):
+            GS.slot[slot].active = isSlotActive(slot)
+            if(GS.slot[slot].active == True):
+                try:
+                    slotInfo = grabSlotInfo(slot)
+                    GS.slot[slot].name = slotInfo[0]
+                    GS.slot[slot].maxhealth = slotInfo[1].split('/')[0]
+                    GS.slot[slot].currenthealth = slotInfo[1].split('/')[0]
+                    print(str(GS.slot[slot].name)+': '+str(GS.slot[slot].maxhealth))
+                except:
+                    continue
+
+    return GS
+
+def updGameState():
+    pass
+
+def grabSlotInfo(slot):
+    viewWindow()
+    viewRegion(rc.DUEL_SLOT[slot])
+    regPath = rc.INSTALLDIR + '\\images\\gamestate\\regionshot.png'
+
+    info = []
+
+    #For name
+    if(slot <=3):
+        reg = rc.DS_NAME[0]
+    else:
+        reg = rc.DS_NAME[1]
+    nameText = str(extractText(regPath, reg))
+    info.append(nameText)
+
+    #For health
+    if(slot <=3):
+        reg = rc.DS_HEALTH[0]
+    else:
+        reg = rc.DS_HEALTH[1]
+    healthPoints = str(extractText(regPath, reg))
+    info.append(healthPoints)
+
+    return info
