@@ -4,6 +4,7 @@ import pytesseract
 import numpy as np
 import pyautogui as pg
 import json
+import unidecode
 
 #Startup functions
 def initLibCards():
@@ -46,32 +47,39 @@ def findWindowLocation():
     global zeroPixel_left
     global zeroPixel_top
     buttonPath = rc.INSTALLDIR + '\images\\buttons\\shop.png'
-    loc = pg.locateOnScreen(buttonPath, confidence=0.8)
+    try:
+        loc = pg.locateOnScreen(buttonPath, confidence=0.8)
+    except:
+        loc = 'None'
     if('None' not in str(loc)):
-        zeroPixel_left = loc[0]-23
-        zeroPixel_top  = loc[1]-37
+        zeroPixel_left = int(loc[0]-23)
+        zeroPixel_top  = int(loc[1]-37)
         print('Window location found at: (' + str(zeroPixel_left) + ',' + str(zeroPixel_top) + ')')
     else:
         print('Window location not found')
 
-def extractText(imageName, reg=(-1,-1,-1,-1)):
+def extractText(imageName, reg=(-1,-1,-1,-1), exType='none'):
     pytesseract.pytesseract.tesseract_cmd = rc.TESSPATH
-    img = cv2.imread(imageName)
+    oimg = cv2.imread(imageName)
     
     if(reg[0]!=-1):
         left = reg[0]
         right = reg[0]+reg[2]
         top = reg[1]
         bottom = reg[1]+reg[3]
-        img = img[top:bottom, left:right]
-       
+        img = oimg[top:bottom, left:right]
+
+    if(exType == 'name'):
+        img = cv2.resize(img, ((right-left)*5, (bottom-top)*5), interpolation=cv2.INTER_AREA)
+    
     gray = cv2.cvtColor(img,cv2.COLOR_RGB2GRAY)
 
     text = pytesseract.image_to_string(img)
     if(text == ""):
         text = pytesseract.image_to_string(gray)
-
-    text = str(text).strip().replace('‘','').replace(',','').replace('\n','').replace('\'','').replace('-','').replace(':','')
+    
+    text = unidecode.unidecode(text)
+    text = str(text).strip().replace('‘','').replace(',','').replace('\n','').replace('\'','').replace('-','').replace(':','').rstrip()
     
     return text
 
@@ -320,7 +328,7 @@ def grabSlotInfo(slot):
         reg = rc.DS_NAME[0]
     else:
         reg = rc.DS_NAME[1]
-    nameText = str(extractText(regPath, reg))
+    nameText = str(extractText(regPath, reg, 'name'))
     info.append(nameText)
 
     #For health
