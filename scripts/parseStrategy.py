@@ -29,6 +29,17 @@ def writeUse(i, step):
     str += '\n'+rc.TAB5+'continue'
     return str
 
+def writeDiscard(i, step):
+    data = step.split(' ')
+    str = '\n'+rc.TAB4+'if step['+i+']:\n'
+    
+    if('^' in step):
+        str += rc.TAB5+'step['+i+'] = lc.discardCard(\''+data[1].split('^')[0]+'\', buffName=\''+data[1].split('^')[1]+'\')'
+    else:
+        str += rc.TAB5+'step['+i+'] = lc.discardCard(\''+data[1]+'\')'
+        
+    return str
+
 def writePass(i):
     str = '\n'+rc.TAB4+'if step['+i+']:\n'
     str += rc.TAB5+'lc.clickButton(\'pass\')'
@@ -67,6 +78,8 @@ def parse(stratName):
             outStr += writeBuff(i, step)
         elif(step.split(' ')[0] == 'Use'):
             outStr += writeUse(i, step)
+        elif(step.split(' ')[0] == 'Discard'):
+            outStr += writeDiscard(i, step)
         elif(step.split(' ')[0] == 'Pass'):
             outStr += writePass(i)
 

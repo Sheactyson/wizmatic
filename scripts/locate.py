@@ -102,7 +102,10 @@ def findCard(cardName, buffName=''):
     else:
         cardPath = rc.INSTALLDIR + '\\images\\cards\\' + cardName + '\\' + cardName + '.png'
 
-    cardCenter = str(pg.locateCenterOnScreen(cardPath, confidence=0.8))
+    try:
+        cardCenter = str(pg.locateCenterOnScreen(cardPath, confidence=0.8))
+    except:
+        cardCenter = 'None'
 
     if(cardCenter != 'None'):
         cardCenter = cardCenter.replace('Point(x=','').replace(',','').replace('y=','').replace(')','')
@@ -120,7 +123,10 @@ def findButton(buttonName):
 
     buttonPos = [-1,-1]
     buttonPath = rc.INSTALLDIR + '\images\\buttons\\' + buttonName + '.png'
-    buttonCenter = str(pg.locateCenterOnScreen(buttonPath, confidence=0.8))
+    try:
+        buttonCenter = str(pg.locateCenterOnScreen(buttonPath, confidence=0.8))
+    except:
+        buttonCenter = 'None'
 
     if(buttonCenter != 'None'):
         buttonCenter = buttonCenter.replace('Point(x=','').replace(',','').replace('y=','').replace(')','')
@@ -133,7 +139,10 @@ def findButton(buttonName):
 
 def initiative():
     firstPath = rc.INSTALLDIR + '\\images\\gamestate\\opponentFirst.png'
-    firstCenter = str(pg.locateCenterOnScreen(firstPath, confidence=0.8))
+    try:
+        firstCenter = str(pg.locateCenterOnScreen(firstPath, confidence=0.8))
+    except:
+        firstCenter = 'None'
 
     if(firstCenter != 'None'):
         print('Opponents have initiative')
@@ -146,7 +155,10 @@ def initiative():
 
 def isSlotActive(slot):
     slotPath = rc.INSTALLDIR + '\\images\\gamestate\\slot'+str(slot)+'.png'
-    slotCenter = str(pg.locateCenterOnScreen(slotPath, confidence=0.7))
+    try:
+        slotCenter = str(pg.locateCenterOnScreen(slotPath, confidence=0.7))
+    except:
+        slotCenter = 'None'
 
     if(slotCenter != 'None'):
         print('Slot'+str(slot)+' is occupied')
@@ -236,6 +248,40 @@ def clickDuelSlot(slot):
     pg.moveTo(int(slotLoc[0])+zeroPixel_left, int(slotLoc[1])+zeroPixel_top, duration = 0.6)
     pg.click()
     pg.moveTo(zeroPixel_left+960, zeroPixel_top+200, duration = 0.1)
+
+def discardCard(cardName, buffName=''):
+    cardName = cardName.replace('_',' ')
+    buffName = buffName.replace('_',' ')
+    i = 0
+    loop = 1
+    #If it is buffed, might not capture the card correctly first time and need to try multiple times(5)
+    if(buffName != ''):
+        loop = 5
+
+    while(i < loop):
+        card1 = [-1,-1]
+        
+        card1 = findCard(cardName, buffName)
+        if(card1[0] != -1):
+            if(buffName != ''):
+                print('Discarding card ' + cardName + '^' + buffName + '...')
+            else:
+                print('Discarding card ' + cardName + '...')
+            
+            pg.moveTo(int(card1[0]), int(card1[1]), duration = 0.6)
+            pg.click(button='RIGHT')
+            pg.moveTo(zeroPixel_left+960, zeroPixel_top+200, duration = 0.1)
+
+            return False
+        else:
+            if(buffName != ''):
+                print(cardName + '^' + buffName + ' not found')
+            else:
+                print(cardName + ' not found')
+
+        i+=1
+    
+    return True
 
 #Gamestate functions
 def initGameState():

@@ -1,2 +1,3 @@
+Discard Deathblade,
 Buff Ship_of_Fools with Epic,
 Use Ship_of_Fools^Epic
