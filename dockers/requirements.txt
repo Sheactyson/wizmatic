@@ -1,0 +1,5 @@
+# Simple document that contains the python libraries required for the python app to run. These are all installed when the
+# Python docker is built for the first time.
+
+mysql-connector-python
+opencv-python-headless

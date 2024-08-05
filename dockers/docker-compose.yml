@@ -1,0 +1,34 @@
+# This is the docker-compose.yml file that is run when the command "docker-compose" is used. This holds the configurations
+# for all of the dockers, as well as where their shared files are for persistence.
+
+# Unused
+volumes:
+  data:
+
+# Different dockers within the container
+services:
+  # Mariadb docker
+  db:
+    image: mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: wizmatic
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+    # Determines what database is generated when built
+    volumes:
+      - data:/var/lib/mysql
+      - ./dev/mariadb:/docker-entrypoint-initdb.d
+    # Opens the mysql port
+    ports:
+      - "3306:3306"
+  # Python wizmatic app
+  app:
+    build: .
+    volumes:
+      - .:/app
+    # Opens port 5001 to connect to the datbase
+    ports:
+      - "5001:5001"
+    depends_on:
+      - db
