@@ -27,7 +27,7 @@ services:
     build: .
     volumes:
       - .:/app
-    # Opens port 5001 to connect to the datbase
+    # Opens port 5001 to connect to the database
     ports:
       - "5001:5001"
     depends_on:

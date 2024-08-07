@@ -27,7 +27,7 @@ def importPage(url):
     return soup
 
 def importLocal(inputName):
-    filepath = rc.INSTALLDIR + '\\html\\' + inputName + ' - Wizard101 Wiki.html'
+    filepath = rc.INSTALLDIR + '/html/' + inputName + ' - Wizard101 Wiki.html'
     with open(filepath, encoding='utf8') as fp:
         soup = BeautifulSoup(fp, 'html5lib')
     return soup
@@ -51,7 +51,7 @@ def decodeSpell(inputName): #Modified for local, since pulling from web scraper 
     for ele in allImages:
         #Get path of image in files
         if(iPath_found is False and res.cardName in str(ele)):
-            res.imgPath = '\\images\\cards\\' + res.cardName + '\\' + res.cardName + '.png'
+            res.imgPath = '/images/cards/' + res.cardName + '/' + res.cardName + '.png'
             iPath_found  = True
         #Get school of card
         elif(school_found is False and any(sch in str(ele) for sch in rc.SCHOOLS)):
@@ -164,11 +164,11 @@ def populateValues(card: rc.LibCard):
                     card.buffCloak = True
 
 def extractCardImagesFromHtmlDirectory(cardName):
-    saveLocation = str(rc.INSTALLDIR) + '\\images\\cards\\' + cardName
-    directory = str(rc.INSTALLDIR) + '\\html\\Spell_' + cardName + ' - Wizard101 Wiki_files'
+    saveLocation = str(rc.INSTALLDIR) + '/images/cards/' + cardName
+    directory = str(rc.INSTALLDIR) + '/html/Spell_' + cardName + ' - Wizard101 Wiki_files'
 
     #Setup new directory
-    os.chdir(str(rc.INSTALLDIR) + '\\images\\cards')
+    os.chdir(str(rc.INSTALLDIR) + '/images/cards')
     try:
         os.mkdir(saveLocation)
         os.chdir(saveLocation)
@@ -190,7 +190,7 @@ def extractCardImagesFromHtmlDirectory(cardName):
             if('(' in modName):
                 modName = modName.replace('_(','^').replace('_',' ').replace(')','')
             #Save image
-            imgPath = str(directory + '\\' + filename)
+            imgPath = str(directory + '/' + filename)
             img = cv2.imread(imgPath)
             dim = (83, 127)
             scaledImg = cv2.resize(img, dim, interpolation = cv2.INTER_AREA)
@@ -204,8 +204,8 @@ def printCardStatus(cardName):
 
 def populateCardsFromHtml(keep=False):
     #Setup cards based on html directory
-    directory = str(rc.INSTALLDIR) + '\\html'
-    fileLocation = str(rc.INSTALLDIR) + '\\images\\cards\\LibCards.json'
+    directory = str(rc.INSTALLDIR) + '/html'
+    fileLocation = str(rc.INSTALLDIR) + '/images/cards/LibCards.json'
     jsonFile = open(fileLocation, 'w')
     data_final = []
 
@@ -220,3 +220,37 @@ def populateCardsFromHtml(keep=False):
 
     json.dump(data_final, jsonFile, ensure_ascii=False, indent=2)
     jsonFile.close()
+
+def modifyVariantCardValues(modCard):
+    #Extract the type of variant
+    if('^' in modCard.cardName):
+        variant = modCard.cardName.split('^')[1]
+    else:
+        return
+
+    #Proceed based on variant type
+    if(variant in rc.BUFFS_DAMAGE):
+        if(modCard.rounds == 0): #Not DOT
+            if(variant == 'Strong'):
+                modCard.minDamage = modCard.minDamage + 100
+                modCard.maxDamage = modCard.maxDamage + 100
+        else: #Is DOT
+            pass
+
+    elif(variant in rc.BUFFS_PERCENT):
+        pass
+
+    elif(variant in rc.BUFFS_PROTECT):
+        pass
+
+    elif(variant in rc.BUFFS_ACCURACY):
+        pass
+
+    elif(variant in rc.BUFFS_HEALING):
+        pass
+
+    elif(variant in rc.BUFFS_DELAY):
+        pass
+
+    else:
+        return

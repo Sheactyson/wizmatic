@@ -3,3 +3,6 @@
 
 mysql-connector-python
 opencv-python-headless
+requests
+beautifulsoup4
+html5lib

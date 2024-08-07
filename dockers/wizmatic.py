@@ -2,7 +2,7 @@ import mysql.connector # type: ignore
 import time
 import os
 
-import scripts.imagepull as impl
+import scripts.dataManagement as dm
 
 
 # Function to establish a connection to the database
@@ -25,8 +25,8 @@ def create_connection():
 # Try to connect to the database until it's ready
 db = None
 while db is None:
-    db = create_connection()
     time.sleep(2)  # Wait for 2 seconds before trying again
+    db = create_connection()
 
 cursor = db.cursor()
 print('ENTER WIZMATIC')
@@ -34,7 +34,7 @@ time.sleep(1)  # Wait for 1 second before starting
 
 print("Start Test")
 
-#impl.pullImage(url='https://www.imagebam.com/view/MEV4DVE')
+dm.convertHTMLtoDatabase()
 
 print("End Test")
 

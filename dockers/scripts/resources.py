@@ -30,7 +30,7 @@ class LibCard:
         self.totalHOT: int
         self.roundDOT: int
         self.roundHOT: int
-        self.rounds: int
+        self.rounds: int = 0
         
         self.basePercent: int
         self.baseSelfPercent: int
@@ -63,7 +63,7 @@ class GameSlot:
         self.currenthealth: int
 
 #Important links/paths
-INSTALLDIR = os.path.abspath('dockers').replace('\\dockers\\','\\')
+INSTALLDIR = '/app'
 WIKIURL = 'https://wizard101central.com'
 TESSPATH = INSTALLDIR + '\\tesseract\\tesseract.exe'
 
