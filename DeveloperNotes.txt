@@ -1,0 +1,8 @@
+Special Cases: 
+    Call of Khrulhu is the only lifesteal that has a decreased lifesteal multiplier when buffed. (40%)
+
+Damage Calculation:
+    Pip-based damage spells are in a separate "PerPip" value which needs to be calculated upon cast.
+    DOT spells are two-fold with the "DOT" showing per round damage and the "Rounds" showing the length of time.
+    If a DOT spell has an intial hit, the damage is stored in the "Damage" value. All other damage is in "DOT".
+    Lifesteal will be calculated upon final damage calculation with the provided "Lifesteal" multiplier.

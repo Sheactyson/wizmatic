@@ -10,43 +10,33 @@ TAB5 = '                    '
 #Class used for parsing cards from wiki
 class LibCard:
     def __init__(self):
-        self.cardName: str = "None"
-        self.type: list = []
-        self.desc: str = "None"
         self.spellURL: str = "None"
         self.imgPath: str = "None"
+        self.name: str = "None"
+        self.desc: str = "None"
+        self.type: list = []
         self.school: str = "None"
-        self.regularPipCost: int
-        self.schoolPipCost: int
-        self.shadowPipCost: int
-        self.baseAccuracy: int
-
-        self.minDamage: int
-        self.maxDamage: int
-        self.baseHeal: int
-        self.baseTake: int
-        
-        self.totalDOT: int
-        self.totalHOT: int
-        self.roundDOT: int
-        self.roundHOT: int
+        self.regularPipCost: int = 0
+        self.schoolPipCost: int = 0
+        self.shadowPipCost: int = 0
+        self.accuracy: int = 0
+        self.pierce: int = 0
+        self.damage: int = 0 
+        self.minDamage: int = -1
+        self.perPip: int = 0
+        self.heal: int = 0
+        self.lifesteal: float = 0
         self.rounds: int = 0
+        self.DOT: int = 0
+        self.HOT: int = 0
+        self.targetPercent: int = 0
+        self.selfPercent: int = 0
         
-        self.basePercent: int
-        self.baseSelfPercent: int
-        self.augmentSchools: list
-
-        self.buffAccuracy: int
-        self.buffPierce: int
-        self.buffDamage: int
-        self.buffHeal: int
-        self.buffRoundDOT: int
-        self.buffRoundHOT: int
-        self.buffPercent: int
-        self.buffProtect: bool
-        self.buffCloak: bool
-        self.buffDelay: bool
-        self.addPips: int
+        self.augmentSchools: list = []
+        self.protect: bool = False
+        self.cloak: bool = False
+        self.delay: bool = False
+        self.addPips: int = 0
 
 #Class used for holding game state
 class GameState:
