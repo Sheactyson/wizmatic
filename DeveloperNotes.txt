@@ -1,5 +1,9 @@
 Special Cases: 
     Call of Khrulhu is the only lifesteal that has a decreased lifesteal multiplier when buffed. (40%)
+    Dark Pact casts two blades.
+    Bladestorm casts blades on all allies.
+    Hydra does three separate attacks with fire, ice, and storm.
+    Day and Night enchants exist, but wtf?
 
 Damage Calculation:
     Pip-based damage spells are in a separate "PerPip" value which needs to be calculated upon cast.

@@ -10,6 +10,7 @@ def convertHTMLtoDatabase():
     for filename in os.listdir(dirHTML):
         if('.html' in filename):
             modName = str(filename).split(' - ')[0].split('Spell_')[1]
+            print(modName)
             
             #Store card images from wiki
             pc.extractCardImagesFromHtmlDirectory(modName)
@@ -17,8 +18,8 @@ def convertHTMLtoDatabase():
             #Store base card details from wiki
             baseCard = pc.decodeSpell(modName)
 
-            if(baseCard.name == 'Call of Khrulhu'):
-                pc.printCardStatus(baseCard)
+            #if(baseCard.name == 'Elemental Blade'):
+            pc.printCardStatus(baseCard)
 
             #Modify card details concerning variants
             dirIMG = str(rc.INSTALLDIR) + '/images/cards/' + modName
@@ -29,7 +30,7 @@ def convertHTMLtoDatabase():
                 modCard.name = filename.split('.')[0] #Update card name to reflect variant
                 pc.modifyVariantCardValues(modCard) #Modify values
 
-                if(baseCard.name == 'Call of Khrulhu'):
-                    pc.printCardStatus(modCard)
+                #if(baseCard.name == 'Elemental Blade'):
+                    #pc.printCardStatus(modCard)
 
                 cardVariants.append(modCard) #Add new variant to list

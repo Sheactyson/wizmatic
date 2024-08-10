@@ -32,9 +32,9 @@ class LibCard:
         self.targetPercent: int = 0
         self.selfPercent: int = 0
         
-        self.augmentSchools: list = []
+        self.damageSchools: list = []
+        self.augmentType: list = []
         self.protect: bool = False
-        self.cloak: bool = False
         self.delay: bool = False
         self.addPips: int = 0
 
@@ -68,6 +68,7 @@ BUFFS_HEALING = ['Primordial','Radical']
 BUFFS_PERCENT = ['Sharpened Blade','Potent Trap']
 BUFFS_PROTECT = ['Aegis','Indemnity']
 BUFFS_DELAY = ['Daybreaker','Nightbringer']
+CHARMS = ['Healing','Accuracy']
 
 #Locations of regions on 1920x1080 screen
 DUEL_SLOT = [(94,1,232,116),(519,1,232,116),(945,1,232,116),(1370,1,232,116), #Located on screen in this

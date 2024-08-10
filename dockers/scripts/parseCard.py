@@ -45,7 +45,7 @@ def decodeSpell(inputName): #Modified for local, since pulling from web scraper 
 
     #Output soup
     outPath = rc.INSTALLDIR + '/html/soup/' + card.name + '.html'
-    file = open(outPath, "w")
+    file = open(outPath, 'w')
     file.write(str(cardHTML))
 
     #iterate through images
@@ -77,7 +77,7 @@ def decodeSpell(inputName): #Modified for local, since pulling from web scraper 
             else:
                 regularPipCost = str(ele.parent.text).strip()
             
-            if(regularPipCost == "X"): #Accounts for all pips spells
+            if(regularPipCost == 'X'): #Accounts for all pips spells
                 card.regularPipCost = -1
             else:
                 card.regularPipCost = int(regularPipCost)
@@ -116,7 +116,9 @@ def populateValues(card: rc.LibCard):
         if(tp == 'Damage Spell'): #Damage Spell
             for word in dList:
                 if(word == 'Deals'):
-                    value = dList[dList.index('Deals')+1]
+                    if(dList[dList.index('Deals')+2] in rc.SCHOOLS):
+                        card.damageSchools.append(dList[dList.index('Deals')+2])
+                    value = dList[dList.index('Deals')+1]    
                     if('-' in value):
                         card.minDamage = int(str(value).split('-')[0].replace(',',''))
                         card.damage = int(str(value).split('-')[1].replace(',',''))
@@ -144,7 +146,8 @@ def populateValues(card: rc.LibCard):
                     card.minDamage = -1
                     card.damage = 0
 
-        elif(tp == "Steal Spell"): #Steal Spell
+        elif(tp == 'Steal Spell'): #Steal Spell
+            card.damageSchools.append('Steal')
             for word in dList:
                 if(word == 'Deals'):
                     value = dList[dList.index('Deals')+1]
@@ -162,7 +165,7 @@ def populateValues(card: rc.LibCard):
                         multiplier = int(str(next).replace('%',''))/100
                     card.lifesteal = multiplier
         elif(tp == 'Enchantment Spell'): #Enchantment Spell
-            if(card.school == "Sun"):
+            if(card.school == 'Sun'):
                 if(card.name in rc.BUFFS_DAMAGE):
                     value = str(card.desc).split('Damage')[0].replace('+','')
                     card.minDamage = -1
@@ -184,8 +187,28 @@ def populateValues(card: rc.LibCard):
                 if(card.name in rc.BUFFS_DELAY):
                     card.delay = True
                     card.addPips = 4
-                if(card.name == "Cloak"):
-                    card.cloak = True
+        elif(tp == 'Charm Spell'): #Charm Spell
+            for word in dList:
+                dList[dList.index(word)] = word.replace(',','')
+                word = word.replace(',','')
+                if('-' in word): #Negative charms
+                    if('on' in dList and dList[dList.index('on')+1] == 'caster'):
+                        card.selfPercent = int(word.replace('%',''))
+                    else:
+                        card.targetPercent = int(word.replace('%',''))
+                if('+' in word): #Positive charms
+                    if('on' in dList and dList[dList.index('on')+1] == 'caster'):
+                        card.selfPercent = int(word.replace('%',''))
+                    else:
+                        card.targetPercent = int(word.replace('%',''))
+                if('%' in word and dList[dList.index(word)+1] == 'Damage'): #Non-School
+                    card.augmentType.append('Balance')
+                if(word in rc.SCHOOLS and ('%' in dList[dList.index(word)-1] or dList[dList.index(word)-1] in rc.SCHOOLS or dList[dList.index(word)-2] in rc.SCHOOLS)): #Adds the correct school types to the list only if they are charm school types
+                    if(word != 'Moon' and word != 'Sun' and word != 'Star' and word not in card.augmentType):
+                        card.augmentType.append(word)
+                if(word in rc.CHARMS and dList[dList.index(word)+1] == 'Charm'):
+                    card.augmentType.append(word)
+
 
 def extractCardImagesFromHtmlDirectory(cardName):
     saveLocation = str(rc.INSTALLDIR) + '/images/cards/' + cardName
@@ -312,10 +335,13 @@ def modifyVariantCardValues(modCard):
             print(modCard.name + ' is not a supported damage buff')
 
     elif(variant in rc.BUFFS_PERCENT):
-        pass
+        if(modCard.targetPercent != 0):
+            modCard.targetPercent = modCard.targetPercent + 10
+        if(modCard.selfPercent != 0):
+            modCard.selfPercent = modCard.selfPercent + 10
 
     elif(variant in rc.BUFFS_PROTECT):
-        pass
+        modCard.protect = True
 
     elif(variant in rc.BUFFS_ACCURACY):
         if(variant == 'Keen Eyes'):
@@ -334,7 +360,12 @@ def modifyVariantCardValues(modCard):
             print(modCard.name + ' is not a supported accuracy buff')
 
     elif(variant in rc.BUFFS_HEALING):
-        pass
+        if(variant == 'Primordial'):
+            modCard.heal = modCard.heal + 100
+        elif(variant == 'Radical'):
+            modCard.heal = modCard.heal + 150
+        else:
+            print(modCard.name + ' is not a supported healing buff')
 
     elif(variant in rc.BUFFS_DELAY):
         pass
