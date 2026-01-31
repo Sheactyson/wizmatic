@@ -1,0 +1,9 @@
+dxcam
+opencv-python
+numpy
+pillow
+pytesseract
+pywin32
+onnxruntime
+pyyaml
+comtypes
