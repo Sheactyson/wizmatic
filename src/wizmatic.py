@@ -1,13 +1,11 @@
 import time
 import cv2
-from pathlib import Path
 from utils.capture_wiz import Wizard101Capture
 from utils.capture_thread import FrameSource
-import utils.button_detect as bDetect
-
-SHOW_CAPTURE = False
-TARGET_HZ = 15
-DT = 1.0 / TARGET_HZ
+from state.game_state import GameState
+from state.game_state_analysis import analyze_game_state
+from config.initiative_config import INITIATIVE_CFG
+from config.wizmatic_config import (DT,SHOW_CAPTURE,SHOW_INITIATIVE_OVERLAY)
 
 def main():
     cap = Wizard101Capture(fps=60)
@@ -15,6 +13,7 @@ def main():
     frames.start()
 
     state_cardSelect_last = None
+    game_state = GameState()
 
     try:
         while True:
@@ -22,24 +21,31 @@ def main():
 
             bundle = frames.get_latest()
             if bundle is not None: # All actions regarding latest frames will go within this statement
-                native = bundle.native  # native image captured
+                #native = bundle.native # native image captured
                 analysis = bundle.normalized(1280, 720, allow_upscale=True) # normalized image captured
 
-                pass_found = bDetect.detect_button(analysis,"pass",rel_roi=(0.25, 0.57, 0.45, 0.63),threshold=0.78)
-                flee_found = bDetect.detect_button(analysis,"flee",rel_roi=(0.55, 0.57, 0.74, 0.63),threshold=0.78)
+                result = analyze_game_state(
+                    analysis,
+                    game_state,
+                    initiative_cfg=INITIATIVE_CFG,
+                    render_initiative=SHOW_INITIATIVE_OVERLAY,
+                )
+                game_state = result.game_state
+                state_cardSelect_current = result.in_card_select
 
-                # If either button is found, we are in Card Select
-                state_cardSelect_current = pass_found or flee_found
+                if SHOW_INITIATIVE_OVERLAY and result.initiative_overlay is not None:
+                    cv2.imshow("wizmatic:initiative", result.initiative_overlay)
+
                 if(state_cardSelect_last != state_cardSelect_current):
                     state_cardSelect_last = state_cardSelect_current
-                    if pass_found or flee_found:
+                    if result.pass_found or result.flee_found:
                         # Card Selection logic
                         print("Card Select Mode")
                     else:
                         # Idle logic
                         print("Idle Mode")
 
-                # If debug windows are open, keep this in your loop:
+                # If debug windows are open, close them:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
