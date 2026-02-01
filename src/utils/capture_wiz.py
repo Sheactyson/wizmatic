@@ -247,10 +247,56 @@ class CaptureManager:
 
 
 # ---------------------------------
-# Main
+# Class to handle returning W101 capture
 # ---------------------------------
 
-def main():
+class Wizard101Capture:
+    def __init__(self, fps=60):
+        self.fps = fps
+        self.frame_id = 0
+        self.hwnd = find_wizard101_window()
+        if not self.hwnd:
+            raise RuntimeError("Wizard101 window not found (exact title required).")
+
+        self.tracker = WindowTracker(self.hwnd)
+        self.capture = CaptureManager(self.tracker.last_monitor, fps=self.fps)
+        self.last_good = None
+
+    def read(self):
+        """Return the latest cropped Wizard101 client frame (BGR) or last_good."""
+        # If minimized, just return last_good (or None)
+        if win32gui.IsIconic(self.hwnd):
+            return self.last_good
+
+        update = self.tracker.poll()
+        if update:
+            rect, mon = update
+            if mon != self.capture.monitor_handle:
+                self.capture.restart_for_monitor(mon)
+
+        frame = self.capture.get_full_frame()
+        if frame is None:
+            return self.last_good
+
+        fh, fw = frame.shape[:2]
+        crop_rect = compute_crop_rect_local(self.tracker.last_rect, self.capture.monitor_handle, fw, fh)
+        if crop_rect is None:
+            return self.last_good
+
+        x1, y1, x2, y2 = crop_rect
+        cropped = frame[y1:y2, x1:x2]
+        self.last_good = cropped
+        self.frame_id += 1
+        return cropped#, {"t": time.time(), "id": self.frame_id}
+
+    def close(self):
+        self.capture.stop()
+
+# ---------------------------------
+# Function to show capturing the Wizard101 window
+# ---------------------------------
+
+def show_wiz():
     hwnd = find_wizard101_window()
     if not hwnd:
         raise RuntimeError("Wizard101 window not found (exact title required).")
@@ -300,5 +346,5 @@ def main():
 
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__capture__":
+    show_wiz()
