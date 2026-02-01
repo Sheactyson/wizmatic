@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List
 import cv2
 import numpy as np
 
@@ -20,10 +21,9 @@ class RingProfile:
 class InitiativeConfig:
     # Profiles keyed by aspect ratio bucket.
     profiles: Dict[str, RingProfile]
-    min_score: float = 0.02
-    min_delta: float = 0.01
-    white_sat_max: int = 60
-    white_val_min: int = 200
+    templates_base_dir: str = "src/assets/initiative"
+    template_min_score: float = 0.05
+    template_min_delta: float = 0.02
 
 
 def _roi_from_center(center: Tuple[float, float], size: Tuple[float, float]) -> Tuple[float, float, float, float]:
@@ -54,14 +54,87 @@ def _aspect_bucket(aspect: float) -> str:
     return best_key
 
 
-def _white_ratio(bgr: np.ndarray, sat_max: int, val_min: int) -> float:
-    if bgr.size == 0:
+_INITIATIVE_TEMPLATE_CACHE: Dict[str, List[np.ndarray]] = {}
+
+
+def _template_suffixes_for_aspect(aspect_key: str) -> Tuple[str, ...]:
+    if aspect_key == "4:3":
+        return ("_4x3",)
+    if aspect_key == "16:10":
+        return ("_16x10",)
+    if aspect_key == "16:9":
+        return ("_16x9",)
+    if aspect_key == "43:18":
+        return ("_43x18",)
+    return ("_16x9",)
+
+
+def _load_templates(base_dir: Path, side: str, state: str, aspect_key: str) -> List[np.ndarray]:
+    candidates: List[Path] = []
+    side_dir = base_dir / side / state
+    if side_dir.exists():
+        candidates.extend(sorted(side_dir.glob("*.png")))
+    if not candidates:
+        generic_dir = base_dir / state
+        if generic_dir.exists():
+            candidates.extend(sorted(generic_dir.glob("*.png")))
+    key = f"{base_dir.resolve()}::{side}::{state}::{aspect_key}"
+    if key in _INITIATIVE_TEMPLATE_CACHE:
+        return _INITIATIVE_TEMPLATE_CACHE[key]
+    templates: List[np.ndarray] = []
+    suffixes = _template_suffixes_for_aspect(aspect_key)
+    for p in candidates:
+        stem = p.stem.strip().lower()
+        if suffixes and not any(stem.endswith(suf) for suf in suffixes):
+            continue
+        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            continue
+        templates.append(img)
+    if not templates:
+        # Fall back to any templates if none matched the aspect suffix.
+        for p in candidates:
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            templates.append(img)
+    _INITIATIVE_TEMPLATE_CACHE[key] = templates
+    return templates
+
+
+def _best_template_score(roi_gray: np.ndarray, templates: List[np.ndarray]) -> float:
+    if roi_gray.size == 0 or not templates:
         return 0.0
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
-    mask = (sat <= sat_max) & (val >= val_min)
-    return float(mask.mean())
+    best = -1.0
+    rh, rw = roi_gray.shape[:2]
+    for templ in templates:
+        th, tw = templ.shape[:2]
+        if tw > rw or th > rh:
+            continue
+        res = cv2.matchTemplate(roi_gray, templ, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        if max_val > best:
+            best = float(max_val)
+    return max(best, 0.0)
+
+
+def _template_ring_score(
+    frame_bgr: np.ndarray,
+    roi: Tuple[float, float, float, float],
+    *,
+    base_dir: Path,
+    side: str,
+    aspect_key: str,
+) -> Tuple[float, float]:
+    roi_bgr = crop_relative(frame_bgr, roi)
+    if roi_bgr.size == 0:
+        return (0.0, 0.0)
+    roi_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    on_templates = _load_templates(base_dir, side, "on", aspect_key)
+    off_templates = _load_templates(base_dir, side, "off", aspect_key)
+    on_score = _best_template_score(roi_gray, on_templates)
+    off_score = _best_template_score(roi_gray, off_templates)
+    return (on_score, off_score)
 
 
 def extract_initiative(
@@ -90,15 +163,35 @@ def extract_initiative(
     sun_crop = crop_relative(frame_bgr, sun_roi)
     dagger_crop = crop_relative(frame_bgr, dagger_roi)
 
-    sun_score = _white_ratio(sun_crop, cfg.white_sat_max, cfg.white_val_min)
-    dagger_score = _white_ratio(dagger_crop, cfg.white_sat_max, cfg.white_val_min)
+    base_dir = Path(cfg.templates_base_dir)
+    sun_on, sun_off = _template_ring_score(
+        frame_bgr,
+        sun_roi,
+        base_dir=base_dir,
+        side="sun",
+        aspect_key=bucket,
+    )
+    dagger_on, dagger_off = _template_ring_score(
+        frame_bgr,
+        dagger_roi,
+        base_dir=base_dir,
+        side="dagger",
+        aspect_key=bucket,
+    )
+    sun_score = sun_on - sun_off
+    dagger_score = dagger_on - dagger_off
+    state.method = "template"
+    state.sun_off_score = sun_off
+    state.dagger_off_score = dagger_off
+    min_score = cfg.template_min_score
+    min_delta = cfg.template_min_delta
 
     state.sun_score = sun_score
     state.dagger_score = dagger_score
     state.profile = bucket
 
     delta = abs(sun_score - dagger_score)
-    if delta >= cfg.min_delta and max(sun_score, dagger_score) >= cfg.min_score:
+    if delta >= min_delta and max(sun_score, dagger_score) >= min_score:
         state.side = "allies" if sun_score > dagger_score else "enemies"
 
     return state
@@ -138,11 +231,13 @@ def render_initiative_overlay(
         copy=False,
     )
 
+    method_tag = state.method or "white"
     label = (
         f"initiative: {state.side or 'unknown'} | "
         f"sun={state.sun_score:.3f} "
         f"dagger={state.dagger_score:.3f} "
-        f"profile={state.profile or 'n/a'}"
+        f"profile={state.profile or 'n/a'} "
+        f"{method_tag}"
     )
     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
     pad = 6

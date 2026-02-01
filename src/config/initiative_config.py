@@ -3,8 +3,7 @@ from config.roi_config import INITIATIVE_RING_PROFILES, INITIATIVE_RING_THRESHOL
 
 INITIATIVE_CFG = InitiativeConfig(
     profiles=INITIATIVE_RING_PROFILES,
-    min_score=INITIATIVE_RING_THRESHOLDS.min_score,
-    min_delta=INITIATIVE_RING_THRESHOLDS.min_delta,
-    white_sat_max=INITIATIVE_RING_THRESHOLDS.white_sat_max,
-    white_val_min=INITIATIVE_RING_THRESHOLDS.white_val_min,
+    templates_base_dir=INITIATIVE_RING_THRESHOLDS.templates_base_dir,
+    template_min_score=INITIATIVE_RING_THRESHOLDS.template_min_score,
+    template_min_delta=INITIATIVE_RING_THRESHOLDS.template_min_delta,
 )
