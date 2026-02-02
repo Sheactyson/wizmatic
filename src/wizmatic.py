@@ -14,6 +14,7 @@ from config.wizmatic_config import (
     DEBUG_DUMP_OCR,
     DEBUG_DUMP_OCR_MAX,
     DEBUG_DUMP_HEALTH_ROI,
+    DEBUG_DUMP_EMPTY_NAME_ROI,
 )
 from config.participants_config import PARTICIPANTS_CFG
 
@@ -71,6 +72,7 @@ def main():
                     render_pip_detection=SHOW_PIPDETECTION_OVERLAY,
                     debug_dump_ocr=DEBUG_DUMP_OCR,
                     debug_dump_health_roi=DEBUG_DUMP_HEALTH_ROI,
+                    debug_dump_empty_names=DEBUG_DUMP_EMPTY_NAME_ROI,
                     debug_dump_ocr_id=str(debug_ocr_session_id),
                     debug_dump_ocr_limit=DEBUG_DUMP_OCR_MAX,
                 )

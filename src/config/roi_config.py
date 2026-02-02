@@ -32,18 +32,11 @@ PARTICIPANT_BOX_PROFILES: Dict[str, ParticipantBoxProfile] = {
         ally_spacing_x=0.217,
         ally_anchor="right",
     ),
-    "16:10": ParticipantBoxProfile(
-        enemy_first_box=(0.049, 0.001, 0.170, 0.108),
-        ally_first_box=(0.110, 0.839, 0.232, 0.992),
-        enemy_spacing_x=0.222,
-        ally_spacing_x=0.217,
-        ally_anchor="right",
-    ),
     "16:9": ParticipantBoxProfile(
         enemy_first_box=(0.04, 0.000, 0.160, 0.08),
         ally_first_box=(0.755, 0.895, 0.870, 1.000),
         enemy_spacing_x=0.225,
-        ally_spacing_x=0.217,
+        ally_spacing_x=0.221,
         ally_anchor="right",
     ),
     "43:18": ParticipantBoxProfile(
@@ -83,12 +76,6 @@ INITIATIVE_RING_PROFILES: Dict[str, RingProfile] = {
         dagger_center=(0.32, 0.39),
         sun_box_size=(0.1, 0.1),
         dagger_box_size=(0.08, 0.07),
-    ),
-    "16:10": RingProfile(
-        sun_center=(0.705, 0.605),
-        dagger_center=(0.358, 0.395),
-        sun_box_size=(0.08, 0.1),
-        dagger_box_size=(0.06, 0.052),
     ),
     "16:9": RingProfile(
         sun_center=(0.69, 0.605),

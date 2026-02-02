@@ -1,6 +1,8 @@
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+import shutil
 import numpy as np
 
 from utils.button_detect import detect_button
@@ -18,6 +20,20 @@ class AnalysisResult:
     flee_found: bool
     initiative_overlay: Optional[np.ndarray] = None
     participants_overlay: Optional[np.ndarray] = None
+
+
+def _clear_ocr_dump_dir() -> None:
+    dump_dir = Path("debug/ocr")
+    if not dump_dir.exists():
+        return
+    for path in dump_dir.iterdir():
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink()
+        except Exception:
+            pass
 
 
 TURN_ORDER_ALLIES_FIRST = ["sun", "eye", "star", "moon", "dagger", "key", "ruby", "spiral"]
@@ -48,6 +64,7 @@ def analyze_game_state(
     render_pip_detection: bool = False,
     debug_dump_ocr: bool = False,
     debug_dump_health_roi: bool = False,
+    debug_dump_empty_names: bool = False,
     debug_dump_ocr_id: Optional[str] = None,
     debug_dump_ocr_limit: int = 0,
 ) -> AnalysisResult:
@@ -73,6 +90,8 @@ def analyze_game_state(
     participants_overlay = None
 
     if in_card_select:
+        if (not was_in_card_select) and (debug_dump_ocr or debug_dump_health_roi):
+            _clear_ocr_dump_dir()
         game_state.battle.initiative = extract_initiative(
             analysis,
             initiative_cfg,
@@ -97,6 +116,7 @@ def analyze_game_state(
                 timestamp=game_state.updated_at,
                 debug_dump=debug_dump_ocr,
                 debug_dump_health=debug_dump_health_roi,
+                debug_dump_empty_names=debug_dump_empty_names,
                 debug_dump_id=debug_dump_ocr_id,
                 debug_dump_limit=debug_dump_ocr_limit,
             )

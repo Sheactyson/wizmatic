@@ -91,7 +91,6 @@ class ParticipantsConfig:
 def _aspect_bucket(aspect: float) -> str:
     targets = {
         "4:3": 4.0 / 3.0,
-        "16:10": 16.0 / 10.0,
         "16:9": 16.0 / 9.0,
         "43:18": 43.0 / 18.0,
     }
@@ -400,6 +399,21 @@ def _allow_ocr_dump(debug_dump_id: Optional[str], debug_dump_limit: int) -> bool
     return True
 
 
+def _remove_ocr_dumps_with_prefix(prefix: str, *, dump_id: Optional[str] = None) -> None:
+    if not prefix:
+        return
+    try:
+        for path in _OCR_DUMP_DIR.glob(f"{prefix}_*.png"):
+            try:
+                path.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if dump_id:
+        _OCR_DUMP_COUNTS.pop(dump_id, None)
+
+
 def _dump_health_roi(
     health_crop: np.ndarray,
     *,
@@ -436,6 +450,18 @@ def _normalize_word(text: str) -> str:
     return " ".join("".join(filtered).split())
 
 
+def _normalize_ocr_compare(text: Optional[str]) -> str:
+    if text is None:
+        return ""
+    return str(text).strip().upper()
+
+
+def _normalize_ocr_input(text: str) -> str:
+    cleaned = re.sub(r"[.,;:]+", " ", str(text))
+    cleaned = re.sub(r"[^A-Za-z0-9 \-_`'|/]+", " ", cleaned)
+    return " ".join(cleaned.upper().split())
+
+
 def _is_truncated_text(text: str) -> bool:
     t = text.strip()
     if "..." in t or "…" in t:
@@ -448,6 +474,7 @@ def _is_truncated_text(text: str) -> bool:
 def _match_wordlist_prefix(prefix: str, cfg: OCRConfig) -> Optional[str]:
     if not prefix or len(prefix) < cfg.wordlist_prefix_min_chars:
         return None
+    prefix = _normalize_ocr_compare(prefix)
     words, norms = _load_wordlist(cfg.user_words_path)
     if not words:
         return None
@@ -473,9 +500,45 @@ def _match_wordlist_prefix(prefix: str, cfg: OCRConfig) -> Optional[str]:
     return None
 
 
+def _match_wordlist_short_prefix(prefix: str, cfg: OCRConfig) -> Optional[str]:
+    prefix = _normalize_ocr_compare(prefix)
+    if not prefix:
+        return None
+    prefix_ns = prefix.replace(" ", "")
+    if len(prefix_ns) < 3:
+        return None
+    words, norms = _load_wordlist(cfg.user_words_path)
+    if not words:
+        return None
+    best_i = -1
+    best_ratio = 0.0
+    best_len = 0
+    min_ratio = max(cfg.wordlist_prefix_min_ratio, 0.75)
+    max_len = 5
+    for i, norm_word in enumerate(norms):
+        if not norm_word:
+            continue
+        norm_ns = norm_word.replace(" ", "")
+        if len(norm_ns) > max_len:
+            continue
+        if not (norm_word.startswith(prefix) or norm_ns.startswith(prefix_ns)):
+            continue
+        ratio = len(prefix_ns) / max(1, len(norm_ns))
+        if ratio < min_ratio:
+            continue
+        if ratio > best_ratio or (ratio == best_ratio and len(norm_word) < best_len):
+            best_ratio = ratio
+            best_len = len(norm_word)
+            best_i = i
+    if best_i >= 0:
+        return words[best_i]
+    return None
+
+
 def _match_wordlist_substring(substring: str, cfg: OCRConfig) -> Optional[str]:
     if not substring or len(substring) < cfg.wordlist_prefix_min_chars:
         return None
+    substring = _normalize_ocr_compare(substring)
     words, norms = _load_wordlist(cfg.user_words_path)
     if not words:
         return None
@@ -486,6 +549,319 @@ def _match_wordlist_substring(substring: str, cfg: OCRConfig) -> Optional[str]:
         norm_ns = norm_word.replace(" ", "")
         if sub_ns in norm_ns:
             return words[i]
+    return None
+
+
+def _match_wordlist_close(norm_text: str, cfg: OCRConfig) -> Optional[str]:
+    if not norm_text or len(norm_text) < 4:
+        return None
+    norm_text = _normalize_ocr_compare(norm_text)
+    words, norms = _load_wordlist(cfg.user_words_path)
+    if not words:
+        return None
+    best_i = -1
+    best_score = 0.0
+    best_len = 0
+    text_tokens = norm_text.split()
+    for i, norm_word in enumerate(norms):
+        if not norm_word:
+            continue
+        max_len = max(len(norm_text), len(norm_word))
+        if max_len < 4:
+            continue
+        max_dist = max(2, int(max_len * 0.3))
+        dist = _levenshtein(norm_text, norm_word, max_dist)
+        if dist > max_dist:
+            continue
+        score = 1.0 - (dist / max_len)
+        if score < 0.7:
+            continue
+        if len(text_tokens) > 1:
+            cand_tokens = norm_word.split()
+            if not any(token in cand_tokens for token in text_tokens):
+                continue
+        if score > best_score or (score == best_score and len(norm_word) < best_len):
+            best_score = score
+            best_len = len(norm_word)
+            best_i = i
+    if best_i >= 0:
+        return words[best_i]
+    return None
+
+
+def _match_wordlist_prefix_distance(norm_text: str, cfg: OCRConfig) -> Optional[str]:
+    if not norm_text or len(norm_text) < 4:
+        return None
+    norm_text = _normalize_ocr_compare(norm_text)
+    text_ns = norm_text.replace(" ", "")
+    if len(text_ns) < 4:
+        return None
+    words, norms = _load_wordlist(cfg.user_words_path)
+    if not words:
+        return None
+    best_i = -1
+    best_dist = 2
+    best_len = 0
+    max_dist = 1
+    for i, norm_word in enumerate(norms):
+        if not norm_word:
+            continue
+        norm_ns = norm_word.replace(" ", "")
+        if len(norm_ns) < len(text_ns):
+            continue
+        candidate = norm_ns[: len(text_ns)]
+        dist = _levenshtein(text_ns, candidate, max_dist)
+        if dist > max_dist:
+            continue
+        if dist < best_dist or (dist == best_dist and len(norm_word) < best_len):
+            best_dist = dist
+            best_len = len(norm_word)
+            best_i = i
+    if best_i >= 0:
+        return words[best_i]
+    return None
+
+
+def _match_wordlist_token_remainder(norm_text: str, cfg: OCRConfig) -> Optional[str]:
+    if not norm_text or len(norm_text) < 4:
+        return None
+    norm_text = _normalize_ocr_compare(norm_text)
+    raw_tokens = [token for token in norm_text.split() if token]
+    if not raw_tokens:
+        return None
+    words, norms = _load_wordlist(cfg.user_words_path)
+    if not words:
+        return None
+
+    best_i = -1
+    best_score = 0.0
+    best_matched = 0
+    best_len = 0
+
+    for i, norm_word in enumerate(norms):
+        if not norm_word:
+            continue
+        cand_tokens = [token for token in norm_word.split() if token]
+        if not cand_tokens:
+            continue
+
+        cand_counts: Dict[str, int] = {}
+        for tok in cand_tokens:
+            cand_counts[tok] = cand_counts.get(tok, 0) + 1
+
+        matched_tokens: List[str] = []
+        raw_remaining: List[str] = []
+        for tok in raw_tokens:
+            if cand_counts.get(tok, 0) > 0:
+                matched_tokens.append(tok)
+                cand_counts[tok] -= 1
+            else:
+                raw_remaining.append(tok)
+
+        if not matched_tokens:
+            continue
+
+        matched_counts: Dict[str, int] = {}
+        for tok in matched_tokens:
+            matched_counts[tok] = matched_counts.get(tok, 0) + 1
+
+        cand_remaining: List[str] = []
+        for tok in cand_tokens:
+            if matched_counts.get(tok, 0) > 0:
+                matched_counts[tok] -= 1
+                continue
+            cand_remaining.append(tok)
+
+        raw_remain_ns = "".join(raw_remaining)
+        if len(raw_remain_ns) < 2:
+            continue
+        cand_remain_ns = "".join(cand_remaining)
+        if len(cand_remain_ns) < len(raw_remain_ns):
+            continue
+        cand_comp = cand_remain_ns[: len(raw_remain_ns)]
+        max_len = max(len(raw_remain_ns), len(cand_comp))
+        max_dist = max(1, int(max_len * 0.3))
+        dist = _levenshtein(raw_remain_ns, cand_comp, max_dist)
+        if dist > max_dist:
+            continue
+        score = 1.0 - (dist / max_len)
+        if score < 0.7:
+            continue
+        matched_count = len(matched_tokens)
+        if (
+            score > best_score
+            or (score == best_score and matched_count > best_matched)
+            or (score == best_score and matched_count == best_matched and len(norm_word) < best_len)
+        ):
+            best_score = score
+            best_matched = matched_count
+            best_len = len(norm_word)
+            best_i = i
+
+    if best_i >= 0:
+        return words[best_i]
+    return None
+
+
+_ORDERED_OCR_CONFUSIONS: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
+    ("I_L_1", (("I", "L"), ("I", "1"), ("L", "1"))),
+    ("O_0", (("O", "0"),)),
+    ("RN_M", (("RN", "M"),)),
+    ("CL_D", (("CL", "D"),)),
+    ("LL_U", (("LL", "U"),)),
+    ("VV_W", (("VV", "W"),)),
+    ("8_B", (("8", "B"),)),
+    ("5_S", (("5", "S"),)),
+    ("2_Z", (("2", "Z"),)),
+    ("6_G", (("6", "G"),)),
+    ("9_G", (("9", "G"),)),
+    ("C_G", (("C", "G"),)),
+    ("O_D", (("O", "D"),)),
+    ("B_D", (("B", "D"),)),
+    ("P_Q", (("P", "Q"),)),
+    ("V_U", (("V", "U"),)),
+    ("V_Y", (("V", "Y"),)),
+    ("F_E", (("F", "E"),)),
+    ("F_P", (("F", "P"),)),
+    ("K_R", (("K", "R"),)),
+    ("R_P", (("R", "P"),)),
+    ("W_VV", (("W", "VV"),)),
+    ("M_NN", (("M", "NN"),)),
+    ("RI_N", (("RI", "N"),)),
+    ("IL_U", (("IL", "U"),)),
+    ("DASH_UNDERSCORE", (("-", "_"),)),
+    ("APOSTROPHE_BACKTICK", (("'", "`"),)),
+    ("PIPE_I", (("|", "I"),)),
+    ("SLASH_L", (("/", "L"),)),
+)
+
+
+def _generate_candidates_for_rule(text: str, pairs: Tuple[Tuple[str, str], ...]) -> List[str]:
+    if not text:
+        return []
+    candidates: Set[str] = set()
+    for left, right in pairs:
+        for src, dst in ((left, right), (right, left)):
+            if not src:
+                continue
+            start = 0
+            while start < len(text):
+                idx = text.find(src, start)
+                if idx < 0:
+                    break
+                cand = f"{text[:idx]}{dst}{text[idx + len(src):]}"
+                if cand != text:
+                    candidates.add(cand)
+                start = idx + 1
+            if src in text:
+                cand = text.replace(src, dst)
+                if cand != text:
+                    candidates.add(cand)
+    return list(candidates)
+
+
+def _best_wordlist_match_from_candidates(
+    base: str,
+    candidates: List[str],
+    cfg: OCRConfig,
+    *,
+    truncated: bool,
+) -> Optional[str]:
+    best_word = None
+    best_score = 0.0
+    best_penalty = 999
+    for cand in candidates:
+        norm_text = _normalize_word(cand)
+        if not norm_text:
+            continue
+        match = _match_wordlist_for_text(norm_text, cfg, truncated=truncated)
+        if not match:
+            continue
+        score = _score_wordlist_match(norm_text, match)
+        penalty = _levenshtein(base, cand, max(len(base), len(cand)))
+        if score > best_score or (score == best_score and penalty < best_penalty):
+            best_score = score
+            best_penalty = penalty
+            best_word = match
+    return best_word
+
+
+def _score_wordlist_match(norm_text: str, match_word: str) -> float:
+    norm_word = _normalize_word(match_word)
+    left = norm_text.replace(" ", "")
+    right = norm_word.replace(" ", "")
+    if not left or not right:
+        return 0.0
+    max_len = max(len(left), len(right))
+    dist = _levenshtein(left, right, max_len)
+    return 1.0 - (dist / max_len)
+
+
+def _match_wordlist_for_text(norm_text: str, cfg: OCRConfig, *, truncated: bool) -> Optional[str]:
+    if not norm_text:
+        return None
+    if truncated:
+        substring_match = _match_wordlist_substring(norm_text, cfg)
+        if substring_match:
+            return substring_match
+        prefix_match = _match_wordlist_prefix(norm_text, cfg)
+        if prefix_match:
+            return prefix_match
+        if len(norm_text) < cfg.wordlist_prefix_min_chars:
+            short_prefix_match = _match_wordlist_short_prefix(norm_text, cfg)
+            if short_prefix_match:
+                return short_prefix_match
+        prefix_dist_match = _match_wordlist_prefix_distance(norm_text, cfg)
+        if prefix_dist_match:
+            return prefix_dist_match
+        token_match = _match_wordlist_token_remainder(norm_text, cfg)
+        if token_match:
+            return token_match
+    else:
+        prefix_match = _match_wordlist_prefix(norm_text, cfg)
+        if prefix_match:
+            return prefix_match
+        if len(norm_text) < cfg.wordlist_prefix_min_chars:
+            short_prefix_match = _match_wordlist_short_prefix(norm_text, cfg)
+            if short_prefix_match:
+                return short_prefix_match
+        prefix_dist_match = _match_wordlist_prefix_distance(norm_text, cfg)
+        if prefix_dist_match:
+            return prefix_dist_match
+        token_match = _match_wordlist_token_remainder(norm_text, cfg)
+        if token_match:
+            return token_match
+    words, norms = _load_wordlist(cfg.user_words_path)
+    if not words:
+        return None
+    best_i = -1
+    best_dist = cfg.wordlist_max_distance + 1
+    best_ratio = 0.0
+    for i, norm_word in enumerate(norms):
+        if not norm_word:
+            continue
+        max_len = max(len(norm_text), len(norm_word))
+        dist = _levenshtein(norm_text, norm_word, cfg.wordlist_max_distance)
+        if dist > cfg.wordlist_max_distance:
+            continue
+        ratio = 1.0 - (dist / max_len)
+        if dist < best_dist or (dist == best_dist and ratio > best_ratio):
+            best_dist = dist
+            best_ratio = ratio
+            best_i = i
+    if best_i >= 0 and best_ratio >= cfg.wordlist_min_ratio:
+        return words[best_i]
+    if len(norm_text) < cfg.wordlist_prefix_min_chars:
+        short_prefix_match = _match_wordlist_short_prefix(norm_text, cfg)
+        if short_prefix_match:
+            return short_prefix_match
+    # If no close edit-distance match, try prefix match even without ellipsis.
+    prefix_match = _match_wordlist_prefix(norm_text, cfg)
+    if prefix_match:
+        return prefix_match
+    close_match = _match_wordlist_close(norm_text, cfg)
+    if close_match:
+        return close_match
     return None
 
 
@@ -553,41 +929,21 @@ def _levenshtein(a: str, b: str, max_dist: int) -> int:
 def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig) -> Optional[str]:
     if not text:
         return text
-    words, norms = _load_wordlist(cfg.user_words_path)
-    if not words:
-        return text
     truncated = _is_truncated_text(text)
-    norm_text = _normalize_word(text.replace(".", "").replace("…", ""))
-    if not norm_text:
+    base = _normalize_ocr_input(text.replace("â€¦", "...").replace(".", " "))
+    if not base:
         return text
-    if truncated:
-        substring_match = _match_wordlist_substring(norm_text, cfg)
-        if substring_match:
-            return substring_match
-        prefix_match = _match_wordlist_prefix(norm_text, cfg)
-        if prefix_match:
-            return prefix_match
-    best_i = -1
-    best_dist = cfg.wordlist_max_distance + 1
-    best_ratio = 0.0
-    for i, norm_word in enumerate(norms):
-        if not norm_word:
+    base_norm = _normalize_word(base)
+    direct_match = _match_wordlist_for_text(base_norm, cfg, truncated=truncated)
+    if direct_match:
+        return direct_match
+    for _, pairs in _ORDERED_OCR_CONFUSIONS:
+        candidates = _generate_candidates_for_rule(base, pairs)
+        if not candidates:
             continue
-        max_len = max(len(norm_text), len(norm_word))
-        dist = _levenshtein(norm_text, norm_word, cfg.wordlist_max_distance)
-        if dist > cfg.wordlist_max_distance:
-            continue
-        ratio = 1.0 - (dist / max_len)
-        if dist < best_dist or (dist == best_dist and ratio > best_ratio):
-            best_dist = dist
-            best_ratio = ratio
-            best_i = i
-    if best_i >= 0 and best_ratio >= cfg.wordlist_min_ratio:
-        return words[best_i]
-    # If no close edit-distance match, try prefix match even without ellipsis.
-    prefix_match = _match_wordlist_prefix(norm_text, cfg)
-    if prefix_match:
-        return prefix_match
+        match = _best_wordlist_match_from_candidates(base, candidates, cfg, truncated=truncated)
+        if match:
+            return match
     return text
 
 
@@ -979,8 +1335,6 @@ _PIP_TEMPLATE_CACHE: Dict[str, List[Tuple[str, np.ndarray]]] = {}
 def _template_suffixes_for_aspect(aspect_key: str) -> Tuple[str, ...]:
     if aspect_key == "4:3":
         return ("_4x3",)
-    if aspect_key == "16:10":
-        return ("_16x10",)
     if aspect_key == "16:9":
         return ("_16x9",)
     if aspect_key == "43:18":
@@ -1154,6 +1508,7 @@ def _extract_participant(
     occupied_override: Optional[bool] = None,
     debug_dump: bool = False,
     debug_dump_health: bool = False,
+    debug_dump_empty_names: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
 ) -> ParticipantState:
@@ -1187,13 +1542,13 @@ def _extract_participant(
             prepped=prepped,
         )
 
+    tag = f"{side}_{index}_name"
     name_text = None
     if skip_name_ocr:
         name_text = name_override
         name_raw = name_raw_override
     else:
-        name_text = _ocr_name_per_char(name_crop, cfg.ocr) if cfg.ocr.backend == "tesseract" else None
-        tag = f"{side}_{index}_name"
+        name_text = _ocr_name_per_char(name_crop, cfg.ocr)
         if not name_text:
             name_text = _ocr_text(
                 name_crop,
@@ -1293,10 +1648,12 @@ def _extract_participant(
     empty_reason = None
     if name_text is None or not str(name_text).strip():
         empty_reason = "name missing"
-    elif str(name_text).strip().lower() == "unknown":
+    elif _normalize_ocr_compare(name_text) == "UNKNOWN":
         empty_reason = "name unknown"
 
     if empty_reason:
+        if (not skip_name_ocr) and debug_dump and (not debug_dump_empty_names) and debug_dump_id:
+            _remove_ocr_dumps_with_prefix(tag, dump_id=slot_dump_id)
         return ParticipantState(
             side=side,
             index=index,
@@ -1370,6 +1727,7 @@ def extract_participants(
     timestamp: Optional[float] = None,
     debug_dump: bool = False,
     debug_dump_health: bool = False,
+    debug_dump_empty_names: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
 ) -> ParticipantsState:
@@ -1423,6 +1781,7 @@ def extract_participants(
                 occupied_override=(prev_enemy.occupied if prev_enemy is not None else None),
                 debug_dump=debug_dump,
                 debug_dump_health=debug_dump_health,
+                debug_dump_empty_names=debug_dump_empty_names,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
             )
@@ -1442,6 +1801,7 @@ def extract_participants(
                 occupied_override=(prev_ally.occupied if prev_ally is not None else None),
                 debug_dump=debug_dump,
                 debug_dump_health=debug_dump_health,
+                debug_dump_empty_names=debug_dump_empty_names,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
             )

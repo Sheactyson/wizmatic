@@ -37,10 +37,9 @@ def _roi_from_center(center: Tuple[float, float], size: Tuple[float, float]) -> 
 
 
 def _aspect_bucket(aspect: float) -> str:
-    # Buckets: 4:3, 16:10, 16:9, 43:18 (ultrawide)
+    # Buckets: 4:3, 16:9, 43:18 (ultrawide)
     targets = {
         "4:3": 4.0 / 3.0,
-        "16:10": 16.0 / 10.0,
         "16:9": 16.0 / 9.0,
         "43:18": 43.0 / 18.0,
     }
@@ -60,8 +59,6 @@ _INITIATIVE_TEMPLATE_CACHE: Dict[str, List[np.ndarray]] = {}
 def _template_suffixes_for_aspect(aspect_key: str) -> Tuple[str, ...]:
     if aspect_key == "4:3":
         return ("_4x3",)
-    if aspect_key == "16:10":
-        return ("_16x10",)
     if aspect_key == "16:9":
         return ("_16x9",)
     if aspect_key == "43:18":
