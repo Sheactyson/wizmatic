@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Set
 import re
 
 import cv2
@@ -22,6 +22,8 @@ _OCR_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 _OCR_DUMP_COUNTS: Dict[str, int] = {}
 _WORDLIST_CACHE: Dict[str, List[str]] = {}
 _WORDLIST_NORM_CACHE: Dict[str, List[str]] = {}
+_EASYOCR_WARNED = False
+_HEALTH_ROI_DUMPS: Set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,10 @@ class OCRConfig:
     name_blacklist: str = "$§/\\|_`~=+?><,!@#%^&*(}{][)"
     wordlist_prefix_min_ratio: float = 0.6
     wordlist_prefix_min_chars: int = 4
+    backend: str = "tesseract"  # "tesseract" or "easyocr"
+    easyocr_langs: Tuple[str, ...] = ("en",)
+    easyocr_gpu: bool = True
+    easyocr_model_dir: Optional[str] = "src/ocr_easy/models"
 
 
 @dataclass(frozen=True)
@@ -189,6 +195,77 @@ def _prep_ocr_name(img_bgr: np.ndarray, scale: int, invert: bool) -> np.ndarray:
     if invert:
         th = cv2.bitwise_not(th)
     return th
+
+
+def _prep_easyocr_image(
+    img_bgr: np.ndarray,
+    cfg: OCRConfig,
+    *,
+    invert: bool,
+    prefer_red: bool,
+    clahe: bool,
+    binarize: bool = False,
+) -> np.ndarray:
+    if img_bgr.size == 0:
+        return img_bgr
+    if prefer_red:
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        lower1 = np.array([0, 120, 80])
+        upper1 = np.array([10, 255, 255])
+        lower2 = np.array([170, 120, 80])
+        upper2 = np.array([179, 255, 255])
+        mask1 = cv2.inRange(hsv, lower1, upper1)
+        mask2 = cv2.inRange(hsv, lower2, upper2)
+        mask = cv2.bitwise_or(mask1, mask2)
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        gray = hsv[:, :, 2].copy()
+        gray[mask == 0] = 255
+    else:
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+    if clahe:
+        clahe_op = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe_op.apply(gray)
+
+    if cfg.scale > 1:
+        gray = cv2.resize(gray, (gray.shape[1] * cfg.scale, gray.shape[0] * cfg.scale), interpolation=cv2.INTER_CUBIC)
+
+    if binarize:
+        _, gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    if invert:
+        gray = cv2.bitwise_not(gray)
+    return gray
+
+
+def _prep_tesseract_health(
+    img_bgr: np.ndarray,
+    cfg: OCRConfig,
+    *,
+    invert: bool,
+) -> np.ndarray:
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    lower1 = np.array([0, 120, 80])
+    upper1 = np.array([10, 255, 255])
+    lower2 = np.array([170, 120, 80])
+    upper2 = np.array([179, 255, 255])
+    mask1 = cv2.inRange(hsv, lower1, upper1)
+    mask2 = cv2.inRange(hsv, lower2, upper2)
+    mask = cv2.bitwise_or(mask1, mask2)
+    gray = cv2.bitwise_and(hsv[:, :, 2], hsv[:, :, 2], mask=mask)
+    return _prep_ocr(gray, cfg.scale, invert)
+
+
+def _prep_plain_health(
+    img_bgr: np.ndarray,
+    cfg: OCRConfig,
+    *,
+    invert: bool,
+) -> np.ndarray:
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    return _prep_ocr(gray, cfg.scale, invert)
 
 
 def _filter_small_components(mask: np.ndarray, min_area_frac: float) -> np.ndarray:
@@ -321,6 +398,34 @@ def _allow_ocr_dump(debug_dump_id: Optional[str], debug_dump_limit: int) -> bool
         return False
     _OCR_DUMP_COUNTS[debug_dump_id] = count + 1
     return True
+
+
+def _dump_health_roi(
+    health_crop: np.ndarray,
+    *,
+    side: str,
+    index: int,
+    debug_dump_id: Optional[str],
+    prepped: Optional[Tuple[Tuple[str, np.ndarray], ...]] = None,
+) -> None:
+    if not debug_dump_id or health_crop.size == 0:
+        return
+    dump_key = f"{debug_dump_id}_{side}_{index}"
+    if dump_key in _HEALTH_ROI_DUMPS:
+        return
+    _HEALTH_ROI_DUMPS.add(dump_key)
+    try:
+        stamp = f"{int(time.time() * 1000)}"
+        path = _OCR_DUMP_DIR / f"health_roi_{side}_{index}_{stamp}.png"
+        cv2.imwrite(str(path), health_crop)
+        if prepped:
+            for suffix, img in prepped:
+                if img is None or getattr(img, "size", 0) == 0:
+                    continue
+                prep_path = _OCR_DUMP_DIR / f"health_roi_{side}_{index}_{stamp}_{suffix}.png"
+                cv2.imwrite(str(prep_path), img)
+    except Exception:
+        pass
 
 
 def _normalize_word(text: str) -> str:
@@ -486,6 +591,55 @@ def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig) -> Optional[
     return text
 
 
+def _easyocr_text(
+    img_bgr: np.ndarray,
+    cfg: OCRConfig,
+    whitelist: str,
+    *,
+    invert_override: Optional[bool] = None,
+    prefer_red: bool = False,
+    clahe: bool = False,
+    name_mode: bool = False,
+    debug_tag: Optional[str] = None,
+    debug_dump: bool = False,
+    debug_dump_id: Optional[str] = None,
+    debug_dump_limit: int = 0,
+) -> Optional[str]:
+    if img_bgr.size == 0:
+        return None
+    invert = cfg.invert if invert_override is None else invert_override
+    prepped = _prep_easyocr_image(
+        img_bgr,
+        cfg,
+        invert=invert,
+        prefer_red=prefer_red,
+        clahe=clahe or name_mode,
+    )
+    if debug_dump and debug_tag and _allow_ocr_dump(debug_dump_id, debug_dump_limit):
+        try:
+            stamp = f"{int(time.time() * 1000)}"
+            raw_path = _OCR_DUMP_DIR / f"{debug_tag}_{stamp}_raw.png"
+            prep_path = _OCR_DUMP_DIR / f"{debug_tag}_{stamp}_prep.png"
+            cv2.imwrite(str(raw_path), img_bgr)
+            cv2.imwrite(str(prep_path), prepped)
+        except Exception:
+            pass
+    try:
+        from ocr_easy.adapter import read_text
+    except Exception as exc:
+        global _EASYOCR_WARNED
+        if not _EASYOCR_WARNED:
+            print(f"[ocr] easyocr unavailable: {exc}")
+            _EASYOCR_WARNED = True
+        return None
+
+    allowlist = whitelist if whitelist else None
+    try:
+        return read_text(prepped, cfg, allowlist=allowlist)
+    except Exception:
+        return None
+
+
 def _ocr_text(
     img_bgr: np.ndarray,
     cfg: OCRConfig,
@@ -501,7 +655,23 @@ def _ocr_text(
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
     blacklist: Optional[str] = None,
+    backend_override: Optional[str] = None,
 ) -> Optional[str]:
+    backend = backend_override or cfg.backend
+    if backend == "easyocr":
+        return _easyocr_text(
+            img_bgr,
+            cfg,
+            whitelist,
+            invert_override=invert_override,
+            prefer_red=prefer_red,
+            clahe=clahe,
+            name_mode=name_mode,
+            debug_tag=debug_tag,
+            debug_dump=debug_dump,
+            debug_dump_id=debug_dump_id,
+            debug_dump_limit=debug_dump_limit,
+        )
     if pytesseract is None or img_bgr.size == 0:
         return None
     if cfg.tesseract_cmd:
@@ -562,21 +732,233 @@ def _ocr_text(
     return text or None
 
 
-_HEALTH_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+_HEALTH_RE = re.compile(r"(\d+)\s*[/\\|Iil]\s*(\d+)")
+_HEALTH_NUM_RE = re.compile(r"\d+")
 
 
 def _parse_health(text: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
     if not text:
         return (None, None)
     m = _HEALTH_RE.search(text)
+    if m:
+        try:
+            cur = int(m.group(1))
+            maxv = int(m.group(2))
+            return (cur, maxv)
+        except Exception:
+            return (None, None)
+    nums = _HEALTH_NUM_RE.findall(text)
+    if len(nums) >= 2:
+        try:
+            return (int(nums[0]), int(nums[1]))
+        except Exception:
+            return (None, None)
+    if len(nums) == 1:
+        try:
+            return (int(nums[0]), None)
+        except Exception:
+            return (None, None)
+    return (None, None)
+
+
+def _first_number(text: Optional[str]) -> Optional[int]:
+    if not text:
+        return None
+    m = _HEALTH_NUM_RE.search(text)
     if not m:
+        return None
+    try:
+        return int(m.group(0))
+    except Exception:
+        return None
+
+
+def _health_score(cur: Optional[int], maxv: Optional[int]) -> int:
+    cur_len = len(str(cur)) if cur is not None else 0
+    max_len = len(str(maxv)) if maxv is not None else 0
+    score = (cur_len * 2) + max_len
+    if cur is not None and maxv is not None:
+        if maxv < cur:
+            score -= 6
+        if abs(max_len - cur_len) > 1:
+            score -= 2
+    return score
+
+
+def _normalize_health_pair(cur: Optional[int], maxv: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    if cur is None or maxv is None:
+        return (cur, maxv)
+    cur_s = str(cur)
+    max_s = str(maxv)
+    if len(max_s) == len(cur_s) + 1:
+        best = None
+        best_delta = None
+        for i in range(len(max_s)):
+            cand_s = max_s[:i] + max_s[i + 1 :]
+            if not cand_s:
+                continue
+            try:
+                cand = int(cand_s)
+            except Exception:
+                continue
+            if cand < cur:
+                continue
+            delta = abs(cand - cur)
+            if best is None or delta < best_delta:
+                best = cand
+                best_delta = delta
+        if best is not None:
+            maxv = best
+    elif len(cur_s) == len(max_s) + 1 and cur > maxv:
+        best = None
+        best_delta = None
+        for i in range(len(cur_s)):
+            cand_s = cur_s[:i] + cur_s[i + 1 :]
+            if not cand_s:
+                continue
+            try:
+                cand = int(cand_s)
+            except Exception:
+                continue
+            if cand > maxv:
+                continue
+            delta = abs(cand - maxv)
+            if best is None or delta < best_delta:
+                best = cand
+                best_delta = delta
+        if best is not None:
+            cur = best
+    return (cur, maxv)
+
+
+def _ocr_health_split(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int]]:
+    if img_bgr.size == 0:
+        return (None, None)
+    h, w = img_bgr.shape[:2]
+    if w == 0:
+        return (None, None)
+    left_end = max(1, int(w * 0.60))
+    right_start = min(w - 1, int(w * 0.40))
+    left_crop = img_bgr[:, :left_end]
+    right_crop = img_bgr[:, right_start:]
+    digits_only = "0123456789"
+    left_text = _ocr_text(left_crop, cfg, digits_only, prefer_red=False, clahe=True, backend_override="tesseract")
+    right_text = _ocr_text(right_crop, cfg, digits_only, prefer_red=False, clahe=True, backend_override="tesseract")
+    return (_first_number(left_text), _first_number(right_text))
+
+
+def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int]]:
+    if img_bgr.size == 0:
         return (None, None)
     try:
-        cur = int(m.group(1))
-        maxv = int(m.group(2))
-        return (cur, maxv)
+        from ocr_easy.adapter import read_text, read_text_with_boxes
     except Exception:
         return (None, None)
+
+    def _read_combined(prepped: np.ndarray) -> str:
+        results = read_text_with_boxes(prepped, cfg, allowlist="0123456789/")
+        if results:
+            def _x_min(bbox: List[Tuple[float, float]]) -> float:
+                return min((pt[0] for pt in bbox), default=0.0)
+
+            parts = []
+            for bbox, text, _ in sorted(results, key=lambda item: _x_min(item[0])):
+                cleaned = text.replace(" ", "").replace(",", "")
+                if cleaned:
+                    parts.append(cleaned)
+            if parts:
+                return " ".join(parts)
+        return read_text(prepped, cfg, allowlist="0123456789/") or ""
+
+    def _parse_text(text: str) -> Tuple[Optional[int], Optional[int]]:
+        cur, maxv = _parse_health(text)
+        if cur is not None or maxv is not None:
+            return (cur, maxv)
+        nums = _HEALTH_NUM_RE.findall(text or "")
+        if len(nums) >= 2:
+            return (int(nums[0]), int(nums[1]))
+        if len(nums) == 1:
+            return (int(nums[0]), None)
+        return (None, None)
+
+    best_cur = None
+    best_max = None
+
+    for invert in (False, True):
+        prepped = _prep_tesseract_health(img_bgr, cfg, invert=invert)
+        text = _read_combined(prepped)
+        cur, maxv = _parse_text(text)
+        if cur is not None:
+            best_cur = cur
+        if maxv is not None:
+            best_max = maxv
+        if cur is not None and maxv is not None:
+            return (cur, maxv)
+
+    if best_cur is not None and best_max is not None:
+        return (best_cur, best_max)
+
+    for invert in (False, True):
+        prepped = _prep_plain_health(img_bgr, cfg, invert=invert)
+        text = _read_combined(prepped)
+        cur, maxv = _parse_text(text)
+        if cur is not None and best_cur is None:
+            best_cur = cur
+        if maxv is not None and best_max is None:
+            best_max = maxv
+        if best_cur is not None and best_max is not None:
+            return (best_cur, best_max)
+    return (None, None)
+
+
+def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int]]:
+    candidates: List[Tuple[int, Optional[int], Optional[int]]] = []
+
+    def _try(text: Optional[str]) -> None:
+        if not text:
+            return
+        cur, maxv = _parse_health(text)
+        cur, maxv = _normalize_health_pair(cur, maxv)
+        if cur is None and maxv is None:
+            return
+        candidates.append((_health_score(cur, maxv), cur, maxv))
+
+    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True, backend_override="tesseract"))
+    _try(
+        _ocr_text(
+            img_bgr,
+            cfg,
+            cfg.health_whitelist,
+            prefer_red=True,
+            invert_override=True,
+            backend_override="tesseract",
+        )
+    )
+    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=False, backend_override="tesseract"))
+    _try(
+        _ocr_text(
+            img_bgr,
+            cfg,
+            cfg.health_whitelist,
+            prefer_red=False,
+            invert_override=True,
+            backend_override="tesseract",
+        )
+    )
+
+    best = max(candidates, key=lambda item: item[0], default=None)
+    if best is not None and best[2] is not None:
+        return (best[1], best[2])
+
+    split_cur, split_max = _ocr_health_split(img_bgr, cfg)
+    split_cur, split_max = _normalize_health_pair(split_cur, split_max)
+    if split_cur is not None or split_max is not None:
+        candidates.append((_health_score(split_cur, split_max), split_cur, split_max))
+
+    best = max(candidates, key=lambda item: item[0], default=None)
+    if best is None:
+        return (None, None)
+    return (best[1], best[2])
 
 
 def _count_blobs(mask: np.ndarray, min_area: int, max_area: int) -> int:
@@ -764,7 +1146,14 @@ def _extract_participant(
     box_roi: Tuple[float, float, float, float],
     cfg: ParticipantsConfig,
     *,
+    skip_name_ocr: bool = False,
+    name_override: Optional[str] = None,
+    name_raw_override: Optional[str] = None,
+    skip_health_ocr: bool = False,
+    health_override: Optional[Tuple[Optional[int], Optional[int]]] = None,
+    occupied_override: Optional[bool] = None,
     debug_dump: bool = False,
+    debug_dump_health: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
 ) -> ParticipantState:
@@ -783,131 +1172,173 @@ def _extract_participant(
     health_crop = crop_relative(frame_bgr, health_roi)
     pips_crop = crop_relative(frame_bgr, pips_roi)
 
-    health_text = _ocr_text(health_crop, cfg.ocr, cfg.ocr.health_whitelist, prefer_red=True)
-    if not health_text:
-        health_text = _ocr_text(
+    if debug_dump_health and index == 0 and side in ("enemy", "ally"):
+        prepped = None
+        if cfg.ocr.backend == "easyocr":
+            prepped = (
+                ("prepped", _prep_plain_health(health_crop, cfg.ocr, invert=False)),
+                ("prepped_inv", _prep_plain_health(health_crop, cfg.ocr, invert=True)),
+            )
+        _dump_health_roi(
             health_crop,
-            cfg.ocr,
-            cfg.ocr.health_whitelist,
-            prefer_red=True,
-            invert_override=True,
+            side=side,
+            index=index,
+            debug_dump_id=debug_dump_id,
+            prepped=prepped,
         )
-    health_current, health_max = _parse_health(health_text)
+
+    name_text = None
+    if skip_name_ocr:
+        name_text = name_override
+        name_raw = name_raw_override
+    else:
+        name_text = _ocr_name_per_char(name_crop, cfg.ocr) if cfg.ocr.backend == "tesseract" else None
+        tag = f"{side}_{index}_name"
+        if not name_text:
+            name_text = _ocr_text(
+                name_crop,
+                cfg.ocr,
+                cfg.ocr.name_whitelist,
+                clahe=True,
+                psm_override=7,
+                name_mode=True,
+                debug_tag=tag,
+                debug_dump=debug_dump,
+                debug_dump_id=slot_dump_id,
+                debug_dump_limit=debug_dump_limit,
+            )
+        if not name_text:
+            name_text = _ocr_text(
+                name_crop,
+                cfg.ocr,
+                cfg.ocr.name_whitelist,
+                clahe=True,
+                invert_override=True,
+                psm_override=7,
+                name_mode=True,
+                debug_tag=f"{tag}_inv",
+                debug_dump=debug_dump,
+                debug_dump_id=slot_dump_id,
+                debug_dump_limit=debug_dump_limit,
+            )
+        if not name_text:
+            name_text = _ocr_text(
+                name_crop,
+                cfg.ocr,
+                cfg.ocr.name_whitelist,
+                clahe=True,
+                psm_override=8,
+                name_mode=True,
+                debug_tag=f"{tag}_psm8",
+                debug_dump=debug_dump,
+                debug_dump_id=slot_dump_id,
+                debug_dump_limit=debug_dump_limit,
+            )
+        if not name_text:
+            name_text = _ocr_text(
+                name_crop,
+                cfg.ocr,
+                cfg.ocr.name_whitelist,
+                clahe=True,
+                invert_override=True,
+                psm_override=8,
+                name_mode=True,
+                debug_tag=f"{tag}_psm8_inv",
+                debug_dump=debug_dump,
+                debug_dump_id=slot_dump_id,
+                debug_dump_limit=debug_dump_limit,
+            )
+        if not name_text:
+            name_text = _ocr_text(
+                name_crop,
+                cfg.ocr,
+                cfg.ocr.name_whitelist,
+                clahe=True,
+                psm_override=6,
+                name_mode=True,
+                debug_tag=f"{tag}_psm6",
+                debug_dump=debug_dump,
+                debug_dump_id=slot_dump_id,
+                debug_dump_limit=debug_dump_limit,
+            )
+        if not name_text:
+            name_text = _ocr_text(
+                name_crop,
+                cfg.ocr,
+                "",
+                clahe=True,
+                psm_override=7,
+                name_mode=True,
+                debug_tag=f"{tag}_nowhitelist",
+                debug_dump=debug_dump,
+                debug_dump_id=slot_dump_id,
+                debug_dump_limit=debug_dump_limit,
+            )
+        if not name_text:
+            name_text = _ocr_text(
+                name_crop,
+                cfg.ocr,
+                cfg.ocr.name_whitelist,
+                psm_override=7,
+                name_mode=False,
+                blacklist=cfg.ocr.name_blacklist,
+                debug_tag=f"{tag}_otsu",
+                debug_dump=debug_dump,
+                debug_dump_id=slot_dump_id,
+                debug_dump_limit=debug_dump_limit,
+            )
+        name_raw = name_text
+        name_text = _apply_wordlist_correction(name_text, cfg.ocr)
+
+    empty_reason = None
+    if name_text is None or not str(name_text).strip():
+        empty_reason = "name missing"
+    elif str(name_text).strip().lower() == "unknown":
+        empty_reason = "name unknown"
+
+    if empty_reason:
+        return ParticipantState(
+            side=side,
+            index=index,
+            rel_roi=box_roi,
+            name=None,
+            name_raw=name_raw,
+            health_current=None,
+            health_max=None,
+            pips=PipInventory(),
+            occupied=False,
+            empty_reason=empty_reason,
+            name_roi=name_roi,
+            health_roi=health_roi,
+            pips_roi=pips_roi,
+        )
+
+    if skip_health_ocr:
+        if health_override is None:
+            health_current, health_max = (None, None)
+        else:
+            health_current, health_max = health_override
+    else:
+        health_current, health_max = _ocr_health(health_crop, cfg.ocr)
     occupied = health_current is not None or health_max is not None
+    if not occupied and skip_health_ocr and occupied_override is not None:
+        occupied = occupied_override
     if not occupied:
         return ParticipantState(
             side=side,
             index=index,
             rel_roi=box_roi,
             name=None,
-            name_raw=None,
+            name_raw=name_raw,
             health_current=None,
             health_max=None,
             pips=PipInventory(),
             occupied=False,
+            empty_reason="no health",
             name_roi=name_roi,
             health_roi=health_roi,
             pips_roi=pips_roi,
         )
-
-    name_text = _ocr_name_per_char(name_crop, cfg.ocr)
-    tag = f"{side}_{index}_name"
-    if not name_text:
-        name_text = _ocr_text(
-            name_crop,
-            cfg.ocr,
-            cfg.ocr.name_whitelist,
-            clahe=True,
-            psm_override=7,
-            name_mode=True,
-            debug_tag=tag,
-            debug_dump=debug_dump,
-            debug_dump_id=slot_dump_id,
-            debug_dump_limit=debug_dump_limit,
-        )
-    if not name_text:
-        name_text = _ocr_text(
-            name_crop,
-            cfg.ocr,
-            cfg.ocr.name_whitelist,
-            clahe=True,
-            invert_override=True,
-            psm_override=7,
-            name_mode=True,
-            debug_tag=f"{tag}_inv",
-            debug_dump=debug_dump,
-            debug_dump_id=slot_dump_id,
-            debug_dump_limit=debug_dump_limit,
-        )
-    if not name_text:
-        name_text = _ocr_text(
-            name_crop,
-            cfg.ocr,
-            cfg.ocr.name_whitelist,
-            clahe=True,
-            psm_override=8,
-            name_mode=True,
-            debug_tag=f"{tag}_psm8",
-            debug_dump=debug_dump,
-            debug_dump_id=slot_dump_id,
-            debug_dump_limit=debug_dump_limit,
-        )
-    if not name_text:
-        name_text = _ocr_text(
-            name_crop,
-            cfg.ocr,
-            cfg.ocr.name_whitelist,
-            clahe=True,
-            invert_override=True,
-            psm_override=8,
-            name_mode=True,
-            debug_tag=f"{tag}_psm8_inv",
-            debug_dump=debug_dump,
-            debug_dump_id=slot_dump_id,
-            debug_dump_limit=debug_dump_limit,
-        )
-    if not name_text:
-        name_text = _ocr_text(
-            name_crop,
-            cfg.ocr,
-            cfg.ocr.name_whitelist,
-            clahe=True,
-            psm_override=6,
-            name_mode=True,
-            debug_tag=f"{tag}_psm6",
-            debug_dump=debug_dump,
-            debug_dump_id=slot_dump_id,
-            debug_dump_limit=debug_dump_limit,
-        )
-    if not name_text:
-        name_text = _ocr_text(
-            name_crop,
-            cfg.ocr,
-            "",
-            clahe=True,
-            psm_override=7,
-            name_mode=True,
-            debug_tag=f"{tag}_nowhitelist",
-            debug_dump=debug_dump,
-            debug_dump_id=slot_dump_id,
-            debug_dump_limit=debug_dump_limit,
-        )
-    if not name_text:
-        name_text = _ocr_text(
-            name_crop,
-            cfg.ocr,
-            cfg.ocr.name_whitelist,
-            psm_override=7,
-            name_mode=False,
-            blacklist=cfg.ocr.name_blacklist,
-            debug_tag=f"{tag}_otsu",
-            debug_dump=debug_dump,
-            debug_dump_id=slot_dump_id,
-            debug_dump_limit=debug_dump_limit,
-        )
-
-    name_raw = name_text
-    name_text = _apply_wordlist_correction(name_text, cfg.ocr)
 
     aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0])
     pips = _pip_counts(pips_crop, cfg.pip, aspect_key)
@@ -922,6 +1353,7 @@ def _extract_participant(
         health_max=health_max,
         pips=pips,
         occupied=occupied,
+        empty_reason=None,
         name_roi=name_roi,
         health_roi=health_roi,
         pips_roi=pips_roi,
@@ -932,8 +1364,12 @@ def extract_participants(
     frame_bgr: np.ndarray,
     cfg: ParticipantsConfig,
     *,
+    previous: Optional[ParticipantsState] = None,
+    skip_name_ocr: bool = False,
+    skip_health_ocr: bool = False,
     timestamp: Optional[float] = None,
     debug_dump: bool = False,
+    debug_dump_health: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
 ) -> ParticipantsState:
@@ -953,12 +1389,23 @@ def extract_participants(
     enemies: List[ParticipantState] = []
     allies: List[ParticipantState] = []
 
+    prev_enemies = previous.enemies if previous else []
+    prev_allies = previous.allies if previous else []
+
+    def _prev_for(side: str, idx: int) -> Optional[ParticipantState]:
+        arr = prev_enemies if side == "enemy" else prev_allies
+        if idx < len(arr):
+            return arr[idx]
+        return None
+
     for i in range(profile.slots):
         enemy_roi = _shift_roi(profile.enemy_first_box, profile.enemy_spacing_x * i)
         if profile.ally_anchor == "right":
             ally_roi = _shift_roi(profile.ally_first_box, -profile.ally_spacing_x * i)
         else:
             ally_roi = _shift_roi(profile.ally_first_box, profile.ally_spacing_x * i)
+        prev_enemy = _prev_for("enemy", i) if (skip_health_ocr or skip_name_ocr) else None
+        prev_ally = _prev_for("ally", i) if (skip_health_ocr or skip_name_ocr) else None
         enemies.append(
             _extract_participant(
                 frame_bgr,
@@ -966,7 +1413,16 @@ def extract_participants(
                 i,
                 enemy_roi,
                 cfg,
+                skip_name_ocr=skip_name_ocr,
+                name_override=(prev_enemy.name if prev_enemy is not None else None),
+                name_raw_override=(prev_enemy.name_raw if prev_enemy is not None else None),
+                skip_health_ocr=skip_health_ocr,
+                health_override=(
+                    (prev_enemy.health_current, prev_enemy.health_max) if prev_enemy is not None else None
+                ),
+                occupied_override=(prev_enemy.occupied if prev_enemy is not None else None),
                 debug_dump=debug_dump,
+                debug_dump_health=debug_dump_health,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
             )
@@ -978,7 +1434,14 @@ def extract_participants(
                 i,
                 ally_roi,
                 cfg,
+                skip_name_ocr=skip_name_ocr,
+                name_override=(prev_ally.name if prev_ally is not None else None),
+                name_raw_override=(prev_ally.name_raw if prev_ally is not None else None),
+                skip_health_ocr=skip_health_ocr,
+                health_override=((prev_ally.health_current, prev_ally.health_max) if prev_ally is not None else None),
+                occupied_override=(prev_ally.occupied if prev_ally is not None else None),
                 debug_dump=debug_dump,
+                debug_dump_health=debug_dump_health,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
             )
@@ -1022,7 +1485,7 @@ def render_participants_overlay(
     return vis
 
 
-_ALLY_SIGILS = ["moon", "star", "eye", "sun"]
+_ALLY_SIGILS = ["sun", "eye", "star", "moon"]
 _ENEMY_SIGILS = ["dagger", "key", "ruby", "spiral"]
 
 
@@ -1086,7 +1549,8 @@ def _draw_box_label(vis: np.ndarray, participant: ParticipantState) -> None:
     empty = not participant.occupied
 
     if empty:
-        lines = ["empty slot"]
+        reason = participant.empty_reason or "unknown"
+        lines = [f"empty: {reason}"]
     else:
         name = participant.name or "unknown"
         cur = "?" if participant.health_current is None else str(participant.health_current)

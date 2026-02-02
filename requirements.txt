@@ -1,9 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
 dxcam
 opencv-python
 numpy
 pillow
+easyocr
 pytesseract
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
+torchaudio==2.10.0+cu128
 pywin32
-onnxruntime
-pyyaml
-comtypes

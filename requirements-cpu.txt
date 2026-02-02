@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+dxcam
+opencv-python
+numpy
+pillow
+easyocr
+pytesseract
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+torchaudio==2.10.0+cpu
+pywin32

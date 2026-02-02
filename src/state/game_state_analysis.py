@@ -47,9 +47,11 @@ def analyze_game_state(
     render_participants: bool = False,
     render_pip_detection: bool = False,
     debug_dump_ocr: bool = False,
+    debug_dump_health_roi: bool = False,
     debug_dump_ocr_id: Optional[str] = None,
     debug_dump_ocr_limit: int = 0,
 ) -> AnalysisResult:
+    was_in_card_select = game_state.battle.in_card_select
     pass_found = detect_button(
         analysis,
         "pass",
@@ -84,11 +86,17 @@ def analyze_game_state(
                 game_state.battle.initiative,
             )
         if participants_cfg is not None:
+            reuse_health = was_in_card_select and game_state.battle.participants.detected
+            reuse_names = was_in_card_select and game_state.battle.participants.detected
             game_state.battle.participants = extract_participants(
                 analysis,
                 participants_cfg,
+                previous=game_state.battle.participants if (reuse_health or reuse_names) else None,
+                skip_name_ocr=reuse_names,
+                skip_health_ocr=reuse_health,
                 timestamp=game_state.updated_at,
                 debug_dump=debug_dump_ocr,
+                debug_dump_health=debug_dump_health_roi,
                 debug_dump_id=debug_dump_ocr_id,
                 debug_dump_limit=debug_dump_ocr_limit,
             )

@@ -1,0 +1,12 @@
+.venv/
+debug/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+src/ocr_easy/models/*
+!src/ocr_easy/models/.gitkeep

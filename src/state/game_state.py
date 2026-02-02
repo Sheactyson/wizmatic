@@ -63,6 +63,7 @@ class ParticipantState:
     health_max: Optional[int] = None
     pips: PipInventory = field(default_factory=PipInventory)
     occupied: bool = False
+    empty_reason: Optional[str] = None
     name_roi: Optional[Tuple[float, float, float, float]] = None
     health_roi: Optional[Tuple[float, float, float, float]] = None
     pips_roi: Optional[Tuple[float, float, float, float]] = None

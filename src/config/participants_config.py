@@ -1,4 +1,5 @@
 from config.roi_config import PARTICIPANT_BOX_PROFILES, PARTICIPANT_LAYOUT
+from config.wizmatic_config import OCR_BACKEND
 from state.participants import ParticipantsConfig, PipDetectConfig, OCRConfig
 
 
@@ -29,6 +30,7 @@ OCR_CFG = OCRConfig(
     name_blacklist="0123456789$§/\\|_",
     wordlist_prefix_min_ratio=0.6,
     wordlist_prefix_min_chars=4,
+    backend=OCR_BACKEND,
 )
 
 

@@ -1,0 +1,1 @@
+"""EasyOCR adapter package."""
