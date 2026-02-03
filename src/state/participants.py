@@ -164,6 +164,17 @@ def _prep_name_option_a(img_bgr: np.ndarray) -> np.ndarray:
     return th
 
 
+def _prep_name_option_dark(img_bgr: np.ndarray) -> np.ndarray:
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    v = hsv[:, :, 2]
+    # Keep very dark pixels as text; assumes black name text on lighter background.
+    _, mask = cv2.threshold(v, 70, 255, cv2.THRESH_BINARY_INV)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return np.where(mask > 0, 0, 255).astype(np.uint8)
+
+
 def _prep_name_option_b(img_bgr: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
@@ -180,16 +191,23 @@ def _prep_ocr_name(img_bgr: np.ndarray, scale: int, invert: bool) -> np.ndarray:
             (img_bgr.shape[1] * scale, img_bgr.shape[0] * scale),
             interpolation=cv2.INTER_CUBIC,
         )
-    th = _prep_name_option_a(img_bgr)
-    th = _ensure_black_text_on_white(th)
-    th = _filter_small_components(th, min_area_frac=0.0006)
+    th_dark = _prep_name_option_dark(img_bgr)
+    th_dark = _ensure_black_text_on_white(th_dark)
+    th_dark = _filter_small_components(th_dark, min_area_frac=0.0006)
+    ink = _binary_ink_ratio(th_dark)
+    if 0.003 <= ink <= 0.5:
+        th = th_dark
+    else:
+        th = _prep_name_option_a(img_bgr)
+        th = _ensure_black_text_on_white(th)
+        th = _filter_small_components(th, min_area_frac=0.0006)
 
-    ink = _binary_ink_ratio(th)
-    if ink < 0.004 or ink > 0.5:
-        th_b = _prep_name_option_b(img_bgr)
-        th_b = _ensure_black_text_on_white(th_b)
-        th_b = _filter_small_components(th_b, min_area_frac=0.0006)
-        th = th_b
+        ink = _binary_ink_ratio(th)
+        if ink < 0.004 or ink > 0.5:
+            th_b = _prep_name_option_b(img_bgr)
+            th_b = _ensure_black_text_on_white(th_b)
+            th_b = _filter_small_components(th_b, min_area_frac=0.0006)
+            th = th_b
 
     if invert:
         th = cv2.bitwise_not(th)
@@ -629,12 +647,15 @@ def _match_wordlist_token_remainder(norm_text: str, cfg: OCRConfig) -> Optional[
     raw_tokens = [token for token in norm_text.split() if token]
     if not raw_tokens:
         return None
+    first_token = raw_tokens[0]
     words, norms = _load_wordlist(cfg.user_words_path)
     if not words:
         return None
+    has_any_exact_first = any(first_token in norm.split() for norm in norms)
 
     best_i = -1
     best_score = 0.0
+    best_exact = 0
     best_matched = 0
     best_len = 0
 
@@ -644,56 +665,139 @@ def _match_wordlist_token_remainder(norm_text: str, cfg: OCRConfig) -> Optional[
         cand_tokens = [token for token in norm_word.split() if token]
         if not cand_tokens:
             continue
+        has_exact_first = first_token in cand_tokens
+        if has_any_exact_first and not has_exact_first:
+            continue
 
         cand_counts: Dict[str, int] = {}
         for tok in cand_tokens:
             cand_counts[tok] = cand_counts.get(tok, 0) + 1
 
-        matched_tokens: List[str] = []
+        matched_tokens: List[Tuple[str, int]] = []
         raw_remaining: List[str] = []
         for tok in raw_tokens:
             if cand_counts.get(tok, 0) > 0:
-                matched_tokens.append(tok)
+                matched_tokens.append((tok, 0))
                 cand_counts[tok] -= 1
             else:
                 raw_remaining.append(tok)
 
-        if not matched_tokens:
+        def _token_close_prefix_score(raw_tok: str, cand_tok: str, max_dist: int = 2) -> Optional[Tuple[int, float]]:
+            if not raw_tok or not cand_tok:
+                return None
+            raw_ns = raw_tok.replace(" ", "")
+            cand_ns = cand_tok.replace(" ", "")
+            if not raw_ns or not cand_ns:
+                return None
+            options: List[str] = []
+            if len(cand_ns) >= len(raw_ns):
+                options.append(cand_ns[: len(raw_ns)])
+                if len(cand_ns) >= len(raw_ns) + 1:
+                    options.append(cand_ns[: len(raw_ns) + 1])
+            else:
+                options.append(cand_ns)
+            best_dist = max_dist + 1
+            best_len = 0
+            for opt in options:
+                dist = _levenshtein(raw_ns, opt, max_dist)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_len = max(len(raw_ns), len(opt))
+            if best_dist > max_dist:
+                return None
+            score = 1.0 - (best_dist / max(1, best_len))
+            return (best_dist, score)
+
+        close_matches: List[Tuple[str, str, int, float]] = []
+        cand_remaining_for_close = [tok for tok, count in cand_counts.items() for _ in range(count)]
+        raw_remaining_after_exact: List[str] = []
+        first_token_matched = False
+        for raw_tok in raw_remaining:
+            best = None
+            best_idx = -1
+            for idx, cand_tok in enumerate(cand_remaining_for_close):
+                res = _token_close_prefix_score(raw_tok, cand_tok)
+                if res is None:
+                    continue
+                dist, score = res
+                if best is None or dist < best[2] or (dist == best[2] and score > best[3]):
+                    best = (raw_tok, cand_tok, dist, score)
+                    best_idx = idx
+            if best is None:
+                raw_remaining_after_exact.append(raw_tok)
+                continue
+            close_matches.append(best)
+            cand_remaining_for_close.pop(best_idx)
+            if raw_tok == first_token:
+                first_token_matched = True
+
+        if not matched_tokens and not close_matches:
+            continue
+        if (not has_exact_first) and (not has_any_exact_first) and (not first_token_matched):
             continue
 
-        matched_counts: Dict[str, int] = {}
-        for tok in matched_tokens:
-            matched_counts[tok] = matched_counts.get(tok, 0) + 1
-
-        cand_remaining: List[str] = []
-        for tok in cand_tokens:
-            if matched_counts.get(tok, 0) > 0:
-                matched_counts[tok] -= 1
-                continue
-            cand_remaining.append(tok)
+        cand_remaining = cand_remaining_for_close
+        raw_remaining = raw_remaining_after_exact
 
         raw_remain_ns = "".join(raw_remaining)
-        if len(raw_remain_ns) < 2:
-            continue
         cand_remain_ns = "".join(cand_remaining)
-        if len(cand_remain_ns) < len(raw_remain_ns):
-            continue
-        cand_comp = cand_remain_ns[: len(raw_remain_ns)]
-        max_len = max(len(raw_remain_ns), len(cand_comp))
-        max_dist = max(1, int(max_len * 0.3))
-        dist = _levenshtein(raw_remain_ns, cand_comp, max_dist)
-        if dist > max_dist:
-            continue
-        score = 1.0 - (dist / max_len)
-        if score < 0.7:
-            continue
-        matched_count = len(matched_tokens)
+        exact_count = len(matched_tokens)
+        close_count = len(close_matches)
+        matched_count = exact_count + close_count
+
+        if not raw_remain_ns:
+            score_sum = sum(1.0 for _ in matched_tokens) + sum(cm[3] for cm in close_matches)
+            score = score_sum / max(1, matched_count)
+            if score < 0.7:
+                continue
+        else:
+            if len(cand_remain_ns) < len(raw_remain_ns):
+                continue
+            cand_comp = cand_remain_ns[: len(raw_remain_ns)]
+            max_len = max(len(raw_remain_ns), len(cand_comp))
+            max_dist = max(1, int(max_len * 0.3))
+            dist = _levenshtein(raw_remain_ns, cand_comp, max_dist)
+            score = 1.0 - (dist / max_len)
+            if score < 0.7 and close_count > 0:
+                def _generate_insdel_candidates(raw: str, target: str, cap: int = 64) -> List[str]:
+                    candidates: Set[str] = set()
+                    for idx in range(len(raw)):
+                        candidates.add(raw[:idx] + raw[idx + 1 :])
+                        if len(candidates) >= cap:
+                            return list(candidates)
+                    if target:
+                        for idx in range(len(raw) + 1):
+                            ch = target[idx] if idx < len(target) else target[-1]
+                            candidates.add(raw[:idx] + ch + raw[idx:])
+                            if len(candidates) >= cap:
+                                break
+                    return list(candidates)
+
+                best_alt = score
+                for cand_raw in _generate_insdel_candidates(raw_remain_ns, cand_comp):
+                    if len(cand_comp) < len(cand_raw):
+                        continue
+                    comp = cand_comp[: len(cand_raw)]
+                    max_len_alt = max(len(cand_raw), len(comp))
+                    max_dist_alt = max(1, int(max_len_alt * 0.3))
+                    dist_alt = _levenshtein(cand_raw, comp, max_dist_alt)
+                    alt_score = 1.0 - (dist_alt / max_len_alt)
+                    if alt_score > best_alt:
+                        best_alt = alt_score
+                    if best_alt >= 0.7:
+                        break
+                score = best_alt
+            if score < 0.7:
+                continue
+
         if (
             score > best_score
-            or (score == best_score and matched_count > best_matched)
-            or (score == best_score and matched_count == best_matched and len(norm_word) < best_len)
+            or (score == best_score and exact_count > best_exact)
+            or (score == best_score and exact_count == best_exact and matched_count > best_matched)
+            or (score == best_score and exact_count == best_exact and matched_count == best_matched and len(norm_word) < best_len)
         ):
             best_score = score
+            best_exact = exact_count
             best_matched = matched_count
             best_len = len(norm_word)
             best_i = i
@@ -865,6 +969,50 @@ def _match_wordlist_for_text(norm_text: str, cfg: OCRConfig, *, truncated: bool)
     return None
 
 
+def _best_wordlist_fallback(norm_text: str, cfg: OCRConfig) -> Optional[str]:
+    words, norms = _load_wordlist(cfg.user_words_path)
+    if not words:
+        return None
+    text_ns = norm_text.replace(" ", "")
+    if not text_ns:
+        return None
+    tokens = [token for token in norm_text.split() if token]
+    first_token = tokens[0] if tokens else ""
+
+    def _best_from_indices(indices: List[int]) -> Optional[str]:
+        best_i = -1
+        best_score = -1.0
+        best_len = 0
+        for i in indices:
+            norm_word = norms[i]
+            if not norm_word:
+                continue
+            word_ns = norm_word.replace(" ", "")
+            max_len = max(len(text_ns), len(word_ns))
+            dist = _levenshtein(text_ns, word_ns, max_len)
+            score = 1.0 - (dist / max_len)
+            if score > best_score or (score == best_score and len(norm_word) < best_len):
+                best_score = score
+                best_len = len(norm_word)
+                best_i = i
+        return words[best_i] if best_i >= 0 else None
+
+    if first_token:
+        exact_indices = [i for i, norm in enumerate(norms) if first_token in norm.split()]
+        if exact_indices:
+            return _best_from_indices(exact_indices)
+        close_indices: List[int] = []
+        for i, norm in enumerate(norms):
+            for tok in norm.split():
+                if _levenshtein(first_token, tok[: len(first_token)], 2) <= 2:
+                    close_indices.append(i)
+                    break
+        if close_indices:
+            return _best_from_indices(close_indices)
+
+    return _best_from_indices(list(range(len(norms))))
+
+
 def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
     if not path:
         return ([], [])
@@ -934,17 +1082,32 @@ def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig) -> Optional[
     if not base:
         return text
     base_norm = _normalize_word(base)
+    words, norms = _load_wordlist(cfg.user_words_path)
+    base_tokens = base_norm.split() if base_norm else []
+    base_first_token = base_tokens[0] if base_tokens else ""
+    has_any_exact_first = False
+    if base_first_token and norms:
+        has_any_exact_first = any(base_first_token in norm.split() for norm in norms)
+
+    def _accept_match(match_word: Optional[str]) -> bool:
+        if not match_word:
+            return False
+        if not has_any_exact_first:
+            return True
+        return base_first_token in _normalize_word(match_word).split()
+
     direct_match = _match_wordlist_for_text(base_norm, cfg, truncated=truncated)
-    if direct_match:
+    if direct_match and _accept_match(direct_match):
         return direct_match
     for _, pairs in _ORDERED_OCR_CONFUSIONS:
         candidates = _generate_candidates_for_rule(base, pairs)
         if not candidates:
             continue
         match = _best_wordlist_match_from_candidates(base, candidates, cfg, truncated=truncated)
-        if match:
+        if match and _accept_match(match):
             return match
-    return text
+    fallback = _best_wordlist_fallback(base_norm, cfg)
+    return fallback if fallback else text
 
 
 def _easyocr_text(
@@ -964,13 +1127,16 @@ def _easyocr_text(
     if img_bgr.size == 0:
         return None
     invert = cfg.invert if invert_override is None else invert_override
-    prepped = _prep_easyocr_image(
-        img_bgr,
-        cfg,
-        invert=invert,
-        prefer_red=prefer_red,
-        clahe=clahe or name_mode,
-    )
+    if name_mode:
+        prepped = _prep_ocr_name(img_bgr, cfg.scale, invert)
+    else:
+        prepped = _prep_easyocr_image(
+            img_bgr,
+            cfg,
+            invert=invert,
+            prefer_red=prefer_red,
+            clahe=clahe,
+        )
     if debug_dump and debug_tag and _allow_ocr_dump(debug_dump_id, debug_dump_limit):
         try:
             stamp = f"{int(time.time() * 1000)}"
@@ -1827,19 +1993,19 @@ def render_participants_overlay(
     _draw_participants_legend(vis, initiative_side, aspect_key)
     for p in state.enemies + state.allies:
         if not p.occupied:
-            draw_relative_roi(vis, p.rel_roi, None, color=(128, 128, 128), thickness=1, copy=False)
+            draw_relative_roi(vis, p.rel_roi, None, color=(128, 128, 128), copy=False)
             _draw_box_label(vis, p)
             continue
 
-        draw_relative_roi(vis, p.rel_roi, None, color=(0, 255, 255), thickness=1, copy=False)
+        draw_relative_roi(vis, p.rel_roi, None, color=(0, 255, 255), copy=False)
         _draw_box_label(vis, p)
         if draw_sub_rois:
             if p.name_roi:
-                draw_relative_roi(vis, p.name_roi, None, color=(255, 0, 0), thickness=1, copy=False)
+                draw_relative_roi(vis, p.name_roi, None, color=(255, 0, 0), copy=False)
             if p.health_roi:
-                draw_relative_roi(vis, p.health_roi, None, color=(0, 255, 0), thickness=1, copy=False)
+                draw_relative_roi(vis, p.health_roi, None, color=(0, 255, 0), copy=False)
             if p.pips_roi:
-                draw_relative_roi(vis, p.pips_roi, None, color=(255, 255, 0), thickness=1, copy=False)
+                draw_relative_roi(vis, p.pips_roi, None, color=(255, 255, 0), copy=False)
         if show_pip_detection and p.pips is not None:
             _draw_pip_tokens(vis, p)
     return vis

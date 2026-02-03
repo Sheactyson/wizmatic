@@ -106,8 +106,16 @@ def render_turn_order_overlay(
     cfg: TurnOrderConfig,
 ) -> np.ndarray:
     vis = frame_bgr.copy()
+    slot_rois = [slot.rel_roi for slot in state.slots if slot.rel_roi]
     if state.rel_roi:
-        draw_relative_roi(vis, state.rel_roi, "turn_order", color=(0, 255, 255), copy=False)
+        draw_relative_roi(
+            vis,
+            state.rel_roi,
+            "turn_order",
+            color=(0, 255, 255),
+            copy=False,
+            avoid_rois=slot_rois,
+        )
 
     for slot in state.slots:
         label = f"{slot.index}"
@@ -115,6 +123,16 @@ def render_turn_order_overlay(
         if slot.is_active:
             label = f"{label}*"
             color = (0, 255, 0)
-        draw_relative_roi(vis, slot.rel_roi, label, color=color, copy=False)
+        avoid_rois = [r for r in slot_rois if r != slot.rel_roi]
+        if state.rel_roi:
+            avoid_rois.append(state.rel_roi)
+        draw_relative_roi(
+            vis,
+            slot.rel_roi,
+            label,
+            color=color,
+            copy=False,
+            avoid_rois=avoid_rois,
+        )
 
     return vis

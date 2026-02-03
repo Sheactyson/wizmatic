@@ -11,10 +11,12 @@ from config.wizmatic_config import (
     SHOW_INITIATIVE_OVERLAY,
     SHOW_PARTICIPANTS_OVERLAY,
     SHOW_PIPDETECTION_OVERLAY,
+    SHOW_BUTTON_OVERLAY,
     DEBUG_DUMP_OCR,
     DEBUG_DUMP_OCR_MAX,
     DEBUG_DUMP_HEALTH_ROI,
     DEBUG_DUMP_EMPTY_NAME_ROI,
+    DEBUG_DUMP_INITIATIVE_ROI,
 )
 from config.participants_config import PARTICIPANTS_CFG
 
@@ -70,6 +72,8 @@ def main():
                     render_initiative=SHOW_INITIATIVE_OVERLAY,
                     render_participants=SHOW_PARTICIPANTS_OVERLAY,
                     render_pip_detection=SHOW_PIPDETECTION_OVERLAY,
+                    render_button_overlay=SHOW_BUTTON_OVERLAY,
+                    debug_dump_initiative_roi=DEBUG_DUMP_INITIATIVE_ROI,
                     debug_dump_ocr=DEBUG_DUMP_OCR,
                     debug_dump_health_roi=DEBUG_DUMP_HEALTH_ROI,
                     debug_dump_empty_names=DEBUG_DUMP_EMPTY_NAME_ROI,
@@ -83,6 +87,8 @@ def main():
                     _safe_imshow("wizmatic:initiative", result.initiative_overlay)
                 if SHOW_PARTICIPANTS_OVERLAY and result.participants_overlay is not None:
                     _safe_imshow("wizmatic:participants", result.participants_overlay)
+                if SHOW_BUTTON_OVERLAY and result.button_overlay is not None:
+                    _safe_imshow("wizmatic:buttons", result.button_overlay)
 
                 if(state_cardSelect_last != state_cardSelect_current):
                     state_cardSelect_last = state_cardSelect_current

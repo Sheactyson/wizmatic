@@ -54,6 +54,8 @@ def _aspect_bucket(aspect: float) -> str:
 
 
 _INITIATIVE_TEMPLATE_CACHE: Dict[str, List[np.ndarray]] = {}
+_ROI_DUMP_DIR = Path("debug/initiative")
+_ROI_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _template_suffixes_for_aspect(aspect_key: str) -> Tuple[str, ...]:
@@ -133,12 +135,22 @@ def _template_ring_score(
     off_score = _best_template_score(roi_gray, off_templates)
     return (on_score, off_score)
 
+def _dump_initiative_roi(roi_bgr: np.ndarray, sigil: str) -> None:
+    if roi_bgr.size == 0:
+        return
+    try:
+        path = _ROI_DUMP_DIR / f"{sigil}_roi.png"
+        cv2.imwrite(str(path), roi_bgr)
+    except Exception:
+        pass
+
 
 def extract_initiative(
     frame_bgr: np.ndarray,
     cfg: InitiativeConfig,
     *,
     timestamp: Optional[float] = None,
+    debug_dump_rois: bool = False,
 ) -> InitiativeState:
     state = InitiativeState()
     if frame_bgr is None:
@@ -159,6 +171,9 @@ def extract_initiative(
 
     sun_crop = crop_relative(frame_bgr, sun_roi)
     dagger_crop = crop_relative(frame_bgr, dagger_roi)
+    if debug_dump_rois:
+        _dump_initiative_roi(sun_crop, "sun")
+        _dump_initiative_roi(dagger_crop, "dagger")
 
     base_dir = Path(cfg.templates_base_dir)
     sun_on, sun_off = _template_ring_score(
@@ -219,6 +234,7 @@ def render_initiative_overlay(
         f"sun {state.sun_score:.3f}",
         color=(0, 255, 255),
         copy=False,
+        avoid_rois=[dagger_roi],
     )
     draw_relative_roi(
         vis,
@@ -226,6 +242,7 @@ def render_initiative_overlay(
         f"dagger {state.dagger_score:.3f}",
         color=(255, 255, 0),
         copy=False,
+        avoid_rois=[sun_roi],
     )
 
     method_tag = state.method or "white"
