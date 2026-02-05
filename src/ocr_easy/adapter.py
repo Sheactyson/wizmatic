@@ -54,6 +54,42 @@ def read_text(img: np.ndarray, cfg: Any, *, allowlist: Optional[str] = None) -> 
     return text or None
 
 
+def read_text_batch(
+    imgs: List[np.ndarray],
+    cfg: Any,
+    *,
+    allowlist: Optional[str] = None,
+) -> List[Optional[str]]:
+    reader = _get_reader(cfg)
+    if allowlist == "":
+        allowlist = None
+    if not imgs:
+        return []
+    if hasattr(reader, "readtext_batched"):
+        shapes = [img.shape for img in imgs if isinstance(img, np.ndarray) and img.size > 0]
+        if len(shapes) == len(imgs) and len(set(shapes)) == 1:
+            results = reader.readtext_batched(imgs, detail=0, allowlist=allowlist)
+        else:
+            results = None
+    texts: List[Optional[str]] = []
+    if results is not None:
+        for item in results:
+            if not item:
+                texts.append(None)
+                continue
+            if isinstance(item, str):
+                text = item.strip()
+            else:
+                text = " ".join(str(r).strip() for r in item if r and str(r).strip())
+            texts.append(text or None)
+        return texts
+    return [read_text(img, cfg, allowlist=allowlist) for img in imgs]
+
+
+def warmup(cfg: Any) -> None:
+    _get_reader(cfg)
+
+
 def read_text_with_boxes(
     img: np.ndarray,
     cfg: Any,

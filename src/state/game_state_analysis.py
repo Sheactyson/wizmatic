@@ -12,6 +12,12 @@ from config.roi_config import BUTTON_ROI_CFG
 from state.game_state import GameState, TurnOrderState, InitiativeState, ParticipantsState
 from state.initiative import InitiativeConfig, extract_initiative, render_initiative_overlay
 from state.participants import ParticipantsConfig, extract_participants, render_participants_overlay
+from config.wizmatic_config import (
+    PARTICIPANT_OCCUPANCY_REFRESH_S,
+    PARTICIPANT_DETAILS_REFRESH_S,
+    INITIATIVE_CAPTURE_WINDOW_S,
+    INITIATIVE_STABLE_HOLD_S,
+)
 
 
 @dataclass
@@ -177,28 +183,56 @@ def analyze_game_state(
     if in_card_select:
         if (not was_in_card_select) and (debug_dump_ocr or debug_dump_health_roi):
             _clear_ocr_dump_dir()
-        game_state.battle.initiative = extract_initiative(
-            analysis,
-            initiative_cfg,
-            timestamp=game_state.updated_at,
-            debug_dump_rois=debug_dump_initiative_roi,
-        )
-        _update_turn_order_from_initiative(game_state)
+        if not was_in_card_select:
+            game_state.battle.card_select_started_at = game_state.updated_at
+
+        card_select_started_at = game_state.battle.card_select_started_at or game_state.updated_at
+
+        should_check_initiative = True
+        if game_state.battle.initiative.side:
+            stable_since = game_state.battle.initiative.stable_since
+            stable_ok = stable_since is not None and (game_state.updated_at - stable_since) >= INITIATIVE_STABLE_HOLD_S
+            within_window = (game_state.updated_at - card_select_started_at) <= INITIATIVE_CAPTURE_WINDOW_S
+            should_check_initiative = (not stable_ok) or within_window
+
+        if should_check_initiative:
+            init = extract_initiative(
+                analysis,
+                initiative_cfg,
+                timestamp=game_state.updated_at,
+                debug_dump_rois=debug_dump_initiative_roi,
+            )
+            if init.side:
+                if init.side == game_state.battle.initiative.stable_side:
+                    init.stable_side = game_state.battle.initiative.stable_side or init.side
+                    init.stable_since = game_state.battle.initiative.stable_since
+                else:
+                    init.stable_side = init.side
+                    init.stable_since = game_state.updated_at
+            else:
+                init.stable_side = None
+                init.stable_since = None
+            init.last_checked_at = game_state.updated_at
+            game_state.battle.initiative = init
+            _update_turn_order_from_initiative(game_state)
+
         if render_initiative:
             initiative_overlay = render_initiative_overlay(
                 analysis,
                 initiative_cfg,
                 game_state.battle.initiative,
             )
+
         if participants_cfg is not None:
-            reuse_health = was_in_card_select and game_state.battle.participants.detected
-            reuse_names = was_in_card_select and game_state.battle.participants.detected
+            previous_participants = game_state.battle.participants if game_state.battle.participants.detected else None
             game_state.battle.participants = extract_participants(
                 analysis,
                 participants_cfg,
-                previous=game_state.battle.participants if (reuse_health or reuse_names) else None,
-                skip_name_ocr=reuse_names,
-                skip_health_ocr=reuse_health,
+                previous=previous_participants,
+                skip_name_ocr=False,
+                skip_health_ocr=False,
+                occupancy_refresh_s=PARTICIPANT_OCCUPANCY_REFRESH_S,
+                details_refresh_s=PARTICIPANT_DETAILS_REFRESH_S,
                 timestamp=game_state.updated_at,
                 debug_dump=debug_dump_ocr,
                 debug_dump_health=debug_dump_health_roi,
@@ -219,6 +253,7 @@ def analyze_game_state(
         game_state.battle.turn_order = TurnOrderState()
         game_state.battle.initiative = InitiativeState()
         game_state.battle.participants = ParticipantsState()
+        game_state.battle.card_select_started_at = None
 
     return AnalysisResult(
         game_state=game_state,

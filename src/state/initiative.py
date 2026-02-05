@@ -268,3 +268,36 @@ def render_initiative_overlay(
     )
 
     return vis
+
+
+def render_initiative_boxes(
+    frame_bgr: np.ndarray,
+    cfg: InitiativeConfig,
+    state: InitiativeState,
+) -> np.ndarray:
+    vis = frame_bgr.copy()
+    h, w = vis.shape[:2]
+    if h == 0 or w == 0:
+        return vis
+
+    aspect = w / h
+    bucket = _aspect_bucket(aspect)
+    profile = cfg.profiles.get(bucket)
+    if profile is None:
+        return vis
+
+    sun_roi = _roi_from_center(profile.sun_center, profile.sun_box_size)
+    dagger_roi = _roi_from_center(profile.dagger_center, profile.dagger_box_size)
+
+    unknown = state.side not in ("allies", "enemies")
+    green = (0, 255, 0)
+    gray = (128, 128, 128)
+    sun_color = green if state.side == "allies" else gray
+    dagger_color = green if state.side == "enemies" else gray
+    if unknown:
+        sun_color = gray
+        dagger_color = gray
+
+    draw_relative_roi(vis, sun_roi, None, color=sun_color, copy=False, avoid_rois=[dagger_roi])
+    draw_relative_roi(vis, dagger_roi, None, color=dagger_color, copy=False, avoid_rois=[sun_roi])
+    return vis

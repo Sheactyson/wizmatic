@@ -24,8 +24,14 @@ _PARTICIPANT_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 _OCR_DUMP_COUNTS: Dict[str, int] = {}
 _WORDLIST_CACHE: Dict[str, List[str]] = {}
 _WORDLIST_NORM_CACHE: Dict[str, List[str]] = {}
+_WORDLIST_NORM_NS_CACHE: Dict[str, List[str]] = {}
+_WORDLIST_PREFIX_CACHE: Dict[str, Dict[int, Dict[str, List[int]]]] = {}
+_WORDLIST_TOKEN_INDEX_CACHE: Dict[str, Dict[str, List[int]]] = {}
+_WORDLIST_NORM_MAP_CACHE: Dict[str, Dict[str, str]] = {}
 _EASYOCR_WARNED = False
 _HEALTH_ROI_DUMPS: Set[str] = set()
+
+_WORDLIST_PREFIX_MAX_LEN = 4
 
 
 @dataclass(frozen=True)
@@ -153,6 +159,17 @@ def _binary_ink_ratio(bin_img: np.ndarray) -> float:
     if bin_img.size == 0:
         return 0.0
     return float((bin_img < 128).mean())
+
+
+def _name_roi_hash(img_bgr: np.ndarray) -> Optional[int]:
+    if img_bgr.size == 0:
+        return None
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (32, 8), interpolation=cv2.INTER_AREA)
+    mean = small.mean()
+    bits = (small > mean).astype(np.uint8)
+    packed = np.packbits(bits.reshape(-1))
+    return int.from_bytes(packed.tobytes(), "big")
 
 
 def _ensure_black_text_on_white(bin_img: np.ndarray) -> np.ndarray:
@@ -337,6 +354,8 @@ def _crop_to_foreground(bin_img: np.ndarray, pad: int = 4) -> np.ndarray:
 
 
 def _ocr_name_per_char(img_bgr: np.ndarray, cfg: OCRConfig) -> Optional[str]:
+    if cfg.backend != "tesseract":
+        return None
     if pytesseract is None or img_bgr.size == 0:
         return None
     bin_img = _prep_ocr_name(img_bgr, cfg.scale, invert=False)
@@ -530,17 +549,22 @@ def _match_wordlist_prefix(prefix: str, cfg: OCRConfig) -> Optional[str]:
     if not prefix or len(prefix) < cfg.wordlist_prefix_min_chars:
         return None
     prefix = _normalize_ocr_compare(prefix)
-    words, norms = _load_wordlist(cfg.user_words_path)
+    words, norms, norms_ns, prefix_maps, _ = _load_wordlist_index(cfg.user_words_path)
     if not words:
         return None
     prefix_ns = prefix.replace(" ", "")
+    candidates = _prefix_candidates(prefix_ns, prefix_maps)
+    if candidates is not None and not candidates:
+        return None
     best_i = -1
     best_ratio = 0.0
     best_len = 0
-    for i, norm_word in enumerate(norms):
+    indices = candidates if candidates is not None else range(len(norms))
+    for i in indices:
+        norm_word = norms[i]
         if not norm_word:
             continue
-        norm_ns = norm_word.replace(" ", "")
+        norm_ns = norms_ns[i] if i < len(norms_ns) else norm_word.replace(" ", "")
         if not (norm_word.startswith(prefix) or norm_ns.startswith(prefix_ns)):
             continue
         ratio = len(prefix_ns) / max(1, len(norm_ns))
@@ -562,18 +586,23 @@ def _match_wordlist_short_prefix(prefix: str, cfg: OCRConfig) -> Optional[str]:
     prefix_ns = prefix.replace(" ", "")
     if len(prefix_ns) < 3:
         return None
-    words, norms = _load_wordlist(cfg.user_words_path)
+    words, norms, norms_ns, prefix_maps, _ = _load_wordlist_index(cfg.user_words_path)
     if not words:
+        return None
+    candidates = _prefix_candidates(prefix_ns, prefix_maps)
+    if candidates is not None and not candidates:
         return None
     best_i = -1
     best_ratio = 0.0
     best_len = 0
     min_ratio = max(cfg.wordlist_prefix_min_ratio, 0.75)
     max_len = 5
-    for i, norm_word in enumerate(norms):
+    indices = candidates if candidates is not None else range(len(norms))
+    for i in indices:
+        norm_word = norms[i]
         if not norm_word:
             continue
-        norm_ns = norm_word.replace(" ", "")
+        norm_ns = norms_ns[i] if i < len(norms_ns) else norm_word.replace(" ", "")
         if len(norm_ns) > max_len:
             continue
         if not (norm_word.startswith(prefix) or norm_ns.startswith(prefix_ns)):
@@ -685,10 +714,11 @@ def _match_wordlist_token_remainder(norm_text: str, cfg: OCRConfig) -> Optional[
     if not raw_tokens:
         return None
     first_token = raw_tokens[0]
-    words, norms = _load_wordlist(cfg.user_words_path)
+    words, norms, _, _, token_index = _load_wordlist_index(cfg.user_words_path)
     if not words:
         return None
-    has_any_exact_first = any(first_token in norm.split() for norm in norms)
+    candidate_indices = token_index.get(first_token) if token_index else None
+    has_any_exact_first = bool(candidate_indices)
 
     best_i = -1
     best_score = 0.0
@@ -696,7 +726,9 @@ def _match_wordlist_token_remainder(norm_text: str, cfg: OCRConfig) -> Optional[
     best_matched = 0
     best_len = 0
 
-    for i, norm_word in enumerate(norms):
+    indices = candidate_indices if has_any_exact_first else range(len(norms))
+    for i in indices:
+        norm_word = norms[i]
         if not norm_word:
             continue
         cand_tokens = [token for token in norm_word.split() if token]
@@ -1050,16 +1082,66 @@ def _best_wordlist_fallback(norm_text: str, cfg: OCRConfig) -> Optional[str]:
     return _best_from_indices(list(range(len(norms))))
 
 
+def _build_prefix_maps(norms_ns: List[str], max_len: int) -> Dict[int, Dict[str, List[int]]]:
+    maps: Dict[int, Dict[str, List[int]]] = {length: {} for length in range(1, max_len + 1)}
+    for i, norm_ns in enumerate(norms_ns):
+        if not norm_ns:
+            continue
+        for length in range(1, max_len + 1):
+            if len(norm_ns) < length:
+                break
+            key = norm_ns[:length]
+            bucket = maps[length].get(key)
+            if bucket is None:
+                maps[length][key] = [i]
+            else:
+                bucket.append(i)
+    return maps
+
+
+def _load_wordlist_index(
+    path: Optional[str],
+) -> Tuple[List[str], List[str], List[str], Dict[int, Dict[str, List[int]]], Dict[str, List[int]]]:
+    words, norms = _load_wordlist(path)
+    if not path:
+        return (words, norms, [], {}, {})
+    key = str(Path(path).resolve())
+    norms_ns = _WORDLIST_NORM_NS_CACHE.get(key, [])
+    prefix_maps = _WORDLIST_PREFIX_CACHE.get(key, {})
+    token_index = _WORDLIST_TOKEN_INDEX_CACHE.get(key, {})
+    return (words, norms, norms_ns, prefix_maps, token_index)
+
+
+def _prefix_candidates(prefix_ns: str, prefix_maps: Dict[int, Dict[str, List[int]]]) -> Optional[List[int]]:
+    if not prefix_ns or not prefix_maps:
+        return None
+    plen = min(len(prefix_ns), _WORDLIST_PREFIX_MAX_LEN)
+    table = prefix_maps.get(plen)
+    if table is None:
+        return None
+    return table.get(prefix_ns[:plen], [])
+
+
 def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
     if not path:
         return ([], [])
     p = Path(path)
     key = str(p.resolve())
-    if key in _WORDLIST_CACHE and key in _WORDLIST_NORM_CACHE:
+    if (
+        key in _WORDLIST_CACHE
+        and key in _WORDLIST_NORM_CACHE
+        and key in _WORDLIST_NORM_NS_CACHE
+        and key in _WORDLIST_TOKEN_INDEX_CACHE
+        and key in _WORDLIST_NORM_MAP_CACHE
+    ):
         return (_WORDLIST_CACHE[key], _WORDLIST_NORM_CACHE[key])
     if not p.exists():
         _WORDLIST_CACHE[key] = []
         _WORDLIST_NORM_CACHE[key] = []
+        _WORDLIST_NORM_NS_CACHE[key] = []
+        _WORDLIST_PREFIX_CACHE[key] = {}
+        _WORDLIST_TOKEN_INDEX_CACHE[key] = {}
+        _WORDLIST_NORM_MAP_CACHE[key] = {}
         return ([], [])
     words: List[str] = []
     norms: List[str] = []
@@ -1081,6 +1163,26 @@ def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
         norms = []
     _WORDLIST_CACHE[key] = words
     _WORDLIST_NORM_CACHE[key] = norms
+    norms_ns = [norm.replace(" ", "") for norm in norms]
+    _WORDLIST_NORM_NS_CACHE[key] = norms_ns
+    _WORDLIST_PREFIX_CACHE[key] = _build_prefix_maps(norms_ns, _WORDLIST_PREFIX_MAX_LEN)
+    token_index: Dict[str, List[int]] = {}
+    norm_map: Dict[str, str] = {}
+    for i, norm in enumerate(norms):
+        if not norm:
+            continue
+        if norm not in norm_map:
+            norm_map[norm] = words[i]
+        for tok in set(norm.split()):
+            if not tok:
+                continue
+            bucket = token_index.get(tok)
+            if bucket is None:
+                token_index[tok] = [i]
+            else:
+                bucket.append(i)
+    _WORDLIST_TOKEN_INDEX_CACHE[key] = token_index
+    _WORDLIST_NORM_MAP_CACHE[key] = norm_map
     return (words, norms)
 
 
@@ -1120,6 +1222,12 @@ def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig) -> Optional[
         return text
     base_norm = _normalize_word(base)
     words, norms = _load_wordlist(cfg.user_words_path)
+    if cfg.user_words_path:
+        key = str(Path(cfg.user_words_path).resolve())
+        norm_map = _WORDLIST_NORM_MAP_CACHE.get(key, {})
+        direct = norm_map.get(base_norm)
+        if direct:
+            return direct
     base_tokens = base_norm.split() if base_norm else []
     base_first_token = base_tokens[0] if base_tokens else ""
     has_any_exact_first = False
@@ -1197,6 +1305,177 @@ def _easyocr_text(
         return read_text(prepped, cfg, allowlist=allowlist)
     except Exception:
         return None
+
+
+@dataclass
+class _NameWorkItem:
+    key: Tuple[str, int]
+    crop: np.ndarray
+    tag: str
+    dump_id: Optional[str]
+    start_time: float
+    raw: Optional[str] = None
+    end_time: Optional[float] = None
+    capture_ms: float = 0.0
+    preprocess_ms: float = 0.0
+    ocr_share_ms: float = 0.0
+    resolve_ms: float = 0.0
+
+
+def _pad_batch_images(imgs: List[np.ndarray]) -> List[np.ndarray]:
+    if not imgs:
+        return imgs
+    fixed: List[np.ndarray] = []
+    max_h = 0
+    max_w = 0
+    for img in imgs:
+        if not isinstance(img, np.ndarray) or img.size == 0:
+            continue
+        h, w = img.shape[:2]
+        max_h = max(max_h, h)
+        max_w = max(max_w, w)
+    if max_h == 0 or max_w == 0:
+        return imgs
+    for img in imgs:
+        if not isinstance(img, np.ndarray) or img.size == 0:
+            fixed.append(np.full((max_h, max_w), 255, dtype=np.uint8))
+            continue
+        h, w = img.shape[:2]
+        pad_h = max_h - h
+        pad_w = max_w - w
+        top = pad_h // 2
+        bottom = pad_h - top
+        left = pad_w // 2
+        right = pad_w - left
+        if img.ndim == 2:
+            fixed.append(cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=255))
+        else:
+            channels = img.shape[2]
+            value = tuple([255] * channels)
+            fixed.append(cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=value))
+    return fixed
+
+
+def _batch_easyocr_names(
+    items: List[_NameWorkItem],
+    cfg: OCRConfig,
+    *,
+    debug_dump: bool,
+    debug_dump_limit: int,
+) -> Dict[Tuple[str, int], Tuple[Optional[str], Optional[str], Optional[float], Optional[Tuple[float, float, float, float]]]]:
+    if not items:
+        return {}
+    try:
+        from ocr_easy.adapter import read_text_batch
+    except Exception as exc:
+        global _EASYOCR_WARNED
+        if not _EASYOCR_WARNED:
+            print(f"[ocr] easyocr unavailable: {exc}")
+            _EASYOCR_WARNED = True
+        return {}
+
+    attempts = [
+        {"name_mode": True, "invert": None, "whitelist": cfg.name_whitelist, "clahe": True, "prefer_red": False},
+        {"name_mode": True, "invert": True, "whitelist": cfg.name_whitelist, "clahe": True, "prefer_red": False},
+        {"name_mode": True, "invert": None, "whitelist": cfg.name_whitelist, "clahe": True, "prefer_red": False},
+        {"name_mode": True, "invert": True, "whitelist": cfg.name_whitelist, "clahe": True, "prefer_red": False},
+        {"name_mode": True, "invert": None, "whitelist": cfg.name_whitelist, "clahe": True, "prefer_red": False},
+        {"name_mode": True, "invert": None, "whitelist": "", "clahe": True, "prefer_red": False},
+        {"name_mode": False, "invert": None, "whitelist": cfg.name_whitelist, "clahe": True, "prefer_red": False},
+    ]
+    seen = set()
+    deduped = []
+    for att in attempts:
+        key = (att["name_mode"], att["invert"], att["whitelist"], att["clahe"], att["prefer_red"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(att)
+
+    variant_keys: List[Tuple[bool, Optional[bool], str, bool, bool]] = []
+    for att in deduped:
+        variant_keys.append((att["name_mode"], att["invert"], att["whitelist"], att["clahe"], att["prefer_red"]))
+
+    prepped_cache: Dict[Tuple[str, int], Dict[Tuple[bool, Optional[bool], str, bool, bool], np.ndarray]] = {}
+
+    def _prep_for_variant(
+        item: _NameWorkItem,
+        key: Tuple[bool, Optional[bool], str, bool, bool],
+    ) -> np.ndarray:
+        name_mode, invert_flag, _whitelist, clahe, prefer_red = key
+        invert = cfg.invert if invert_flag is None else invert_flag
+        prep_start = time.perf_counter()
+        if name_mode:
+            prepped = _prep_ocr_name(item.crop, cfg.scale, invert)
+        else:
+            prepped = _prep_easyocr_image(
+                item.crop,
+                cfg,
+                invert=invert,
+                prefer_red=prefer_red,
+                clahe=clahe,
+            )
+        item.preprocess_ms += (time.perf_counter() - prep_start) * 1000.0
+        return prepped
+
+    for attempt_idx, (att, key) in enumerate(zip(deduped, variant_keys)):
+        pending = [item for item in items if item.raw is None]
+        if not pending:
+            break
+        prepped_imgs: List[np.ndarray] = []
+        if attempt_idx == 0:
+            for item in pending:
+                prepped = _prep_for_variant(item, key)
+                prepped_cache.setdefault(item.key, {})[key] = prepped
+                prepped_imgs.append(prepped)
+        else:
+            for item in pending:
+                prepped = prepped_cache[item.key][key]
+                prepped_imgs.append(prepped)
+            if debug_dump and item.tag and _allow_ocr_dump(item.dump_id, debug_dump_limit):
+                try:
+                    stamp = f"{int(time.time() * 1000)}"
+                    raw_path = _OCR_DUMP_DIR / f"{item.tag}_{stamp}_raw.png"
+                    prep_path = _OCR_DUMP_DIR / f"{item.tag}_{stamp}_prep.png"
+                    cv2.imwrite(str(raw_path), item.crop)
+                    cv2.imwrite(str(prep_path), prepped)
+                except Exception:
+                    pass
+        prepped_imgs = _pad_batch_images(prepped_imgs)
+        ocr_start = time.perf_counter()
+        texts = read_text_batch(prepped_imgs, cfg, allowlist=att["whitelist"])
+        ocr_ms = (time.perf_counter() - ocr_start) * 1000.0
+        if pending:
+            ocr_share = ocr_ms / len(pending)
+            for item in pending:
+                item.ocr_share_ms += ocr_share
+        for item, text in zip(pending, texts):
+            if text:
+                item.raw = text
+                item.end_time = time.perf_counter()
+
+        if attempt_idx == 0:
+            pending_after = [item for item in items if item.raw is None]
+            if pending_after:
+                for item in pending_after:
+                    cache = prepped_cache.setdefault(item.key, {})
+                    for later_key in variant_keys[1:]:
+                        if later_key in cache:
+                            continue
+                        cache[later_key] = _prep_for_variant(item, later_key)
+
+    end_all = time.perf_counter()
+    results: Dict[Tuple[str, int], Tuple[Optional[str], Optional[str], Optional[float], Optional[Tuple[float, float, float, float]]]] = {}
+    for item in items:
+        if item.end_time is None:
+            item.end_time = end_all
+        resolve_start = time.perf_counter()
+        final = _apply_wordlist_correction(item.raw, cfg)
+        item.resolve_ms += (time.perf_counter() - resolve_start) * 1000.0
+        elapsed_ms = item.capture_ms + item.preprocess_ms + item.ocr_share_ms + item.resolve_ms
+        parts = (item.capture_ms, item.preprocess_ms, item.ocr_share_ms, item.resolve_ms)
+        results[item.key] = (item.raw, final, elapsed_ms, parts)
+    return results
 
 
 def _ocr_text(
@@ -1817,8 +2096,18 @@ def _extract_participant(
     skip_name_ocr: bool = False,
     name_override: Optional[str] = None,
     name_raw_override: Optional[str] = None,
+    name_time_override: Optional[float] = None,
+    name_time_parts_override: Optional[Tuple[float, float, float, float]] = None,
+    name_hash_override: Optional[int] = None,
+    name_prev_hash: Optional[int] = None,
     skip_health_ocr: bool = False,
     health_override: Optional[Tuple[Optional[int], Optional[int]]] = None,
+    skip_school_detect: bool = False,
+    school_override: Optional[str] = None,
+    school_score_override: Optional[float] = None,
+    skip_pip_detect: bool = False,
+    pips_override: Optional[PipInventory] = None,
+    details_checked_at_override: Optional[float] = None,
     occupied_override: Optional[bool] = None,
     debug_dump: bool = False,
     debug_dump_health: bool = False,
@@ -1827,6 +2116,9 @@ def _extract_participant(
     debug_dump_school_roi: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
+    sigil_override: Optional[str] = None,
+    sigil_score_override: Optional[float] = None,
+    sigil_checked: bool = False,
 ) -> ParticipantState:
     slot_dump_id = f"{debug_dump_id}_{side}_{index}" if debug_dump_id else None
     layout = cfg.layout
@@ -1845,9 +2137,12 @@ def _extract_participant(
     health_roi = _sub_roi(box_roi, health_rel)
     pips_roi = _sub_roi(box_roi, pips_rel)
 
-    sigil_crop = crop_relative(frame_bgr, sigil_roi)
-    _dump_participant_roi(sigil_crop, kind="sigil", side=side, index=index, enabled=debug_dump_sigil_roi)
-    sigil_match, sigil_score = _detect_sigil(sigil_crop, cfg.sigil, aspect_key)
+    if sigil_checked:
+        sigil_match, sigil_score = sigil_override, sigil_score_override
+    else:
+        sigil_crop = crop_relative(frame_bgr, sigil_roi)
+        _dump_participant_roi(sigil_crop, kind="sigil", side=side, index=index, enabled=debug_dump_sigil_roi)
+        sigil_match, sigil_score = _detect_sigil(sigil_crop, cfg.sigil, aspect_key)
     if sigil_match is None:
         return ParticipantState(
             side=side,
@@ -1857,6 +2152,10 @@ def _extract_participant(
             sigil_score=sigil_score,
             name=None,
             name_raw=None,
+            name_time_ms=None,
+            name_time_parts=None,
+            name_roi_hash=None,
+            details_checked_at=None,
             health_current=None,
             health_max=None,
             school=None,
@@ -1871,14 +2170,27 @@ def _extract_participant(
             school_roi=school_roi,
         )
 
+    name_timer_start = time.perf_counter()
     name_crop = crop_relative(frame_bgr, name_roi)
-    health_crop = crop_relative(frame_bgr, health_roi)
-    pips_crop = crop_relative(frame_bgr, pips_roi)
-    school_crop = crop_relative(frame_bgr, school_roi)
-    _dump_participant_roi(school_crop, kind="school", side=side, index=index, enabled=debug_dump_school_roi)
-    school_match, school_score = _detect_school(school_crop, cfg.school, aspect_key, side)
+    name_hash = name_hash_override if name_hash_override is not None else _name_roi_hash(name_crop)
+    health_crop = None
+    pips_crop = None
+    school_crop = None
+    if not skip_health_ocr:
+        health_crop = crop_relative(frame_bgr, health_roi)
+    if not skip_pip_detect:
+        pips_crop = crop_relative(frame_bgr, pips_roi)
+    if not skip_school_detect:
+        school_crop = crop_relative(frame_bgr, school_roi)
+    if school_crop is not None:
+        _dump_participant_roi(school_crop, kind="school", side=side, index=index, enabled=debug_dump_school_roi)
+    if skip_school_detect:
+        school_match = school_override
+        school_score = school_score_override
+    else:
+        school_match, school_score = _detect_school(school_crop, cfg.school, aspect_key, side)
 
-    if debug_dump_health and index == 0 and side in ("enemy", "ally"):
+    if debug_dump_health and (health_crop is not None) and index == 0 and side in ("enemy", "ally"):
         prepped = None
         if cfg.ocr.backend == "easyocr":
             prepped = (
@@ -1895,9 +2207,25 @@ def _extract_participant(
 
     tag = f"{side}_{index}_name"
     name_text = None
-    if skip_name_ocr:
+    reuse_name = (
+        (not skip_name_ocr)
+        and name_prev_hash is not None
+        and name_hash is not None
+        and name_hash == name_prev_hash
+        and (name_override or name_raw_override)
+    )
+
+    if skip_name_ocr or reuse_name:
         name_text = name_override
         name_raw = name_raw_override
+        if name_text is None and name_raw is not None:
+            name_text = name_raw
+        if reuse_name:
+            name_time_ms = (time.perf_counter() - name_timer_start) * 1000.0
+            name_time_parts = None
+        else:
+            name_time_ms = name_time_override
+            name_time_parts = name_time_parts_override
     else:
         name_text = _ocr_name_per_char(name_crop, cfg.ocr)
         if not name_text:
@@ -1995,6 +2323,8 @@ def _extract_participant(
             )
         name_raw = name_text
         name_text = _apply_wordlist_correction(name_text, cfg.ocr)
+        name_time_ms = (time.perf_counter() - name_timer_start) * 1000.0
+        name_time_parts = None
 
     if (not skip_name_ocr) and (not name_text) and debug_dump and (not debug_dump_empty_names) and debug_dump_id:
         _remove_ocr_dumps_with_prefix(tag, dump_id=slot_dump_id)
@@ -2006,7 +2336,10 @@ def _extract_participant(
             health_current, health_max = health_override
     else:
         health_current, health_max = _ocr_health(health_crop, cfg.ocr)
-    pips = _pip_counts(pips_crop, cfg.pip, aspect_key)
+    if skip_pip_detect:
+        pips = pips_override if pips_override is not None else PipInventory()
+    else:
+        pips = _pip_counts(pips_crop, cfg.pip, aspect_key)
 
     return ParticipantState(
         side=side,
@@ -2016,6 +2349,10 @@ def _extract_participant(
         sigil_score=sigil_score,
         name=name_text,
         name_raw=name_raw,
+        name_time_ms=name_time_ms,
+        name_time_parts=name_time_parts,
+        name_roi_hash=name_hash,
+        details_checked_at=details_checked_at_override,
         health_current=health_current,
         health_max=health_max,
         school=school_match,
@@ -2038,6 +2375,8 @@ def extract_participants(
     previous: Optional[ParticipantsState] = None,
     skip_name_ocr: bool = False,
     skip_health_ocr: bool = False,
+    occupancy_refresh_s: float = 5.0,
+    details_refresh_s: float = 3.0,
     timestamp: Optional[float] = None,
     debug_dump: bool = False,
     debug_dump_health: bool = False,
@@ -2062,6 +2401,8 @@ def extract_participants(
 
     enemies: List[ParticipantState] = []
     allies: List[ParticipantState] = []
+    layout = cfg.layout
+    ts = timestamp if timestamp is not None else time.time()
 
     prev_enemies = previous.enemies if previous else []
     prev_allies = previous.allies if previous else []
@@ -2072,14 +2413,183 @@ def extract_participants(
             return arr[idx]
         return None
 
+    def _refresh_due(prev: ParticipantState) -> bool:
+        if details_refresh_s <= 0:
+            return False
+        if prev.details_checked_at is None:
+            return True
+        return (ts - prev.details_checked_at) >= details_refresh_s
+
+    def _name_incomplete(prev: ParticipantState) -> bool:
+        return (not prev.name) or (prev.name == "unknown")
+
+    def _health_incomplete(prev: ParticipantState) -> bool:
+        return (prev.health_current is None) or (prev.health_max is None)
+
+    def _school_incomplete(prev: ParticipantState) -> bool:
+        if not prev.school:
+            return True
+        if prev.school_score is None:
+            return False
+        return prev.school_score < cfg.school.template_threshold
+
+    def _pips_incomplete(prev: ParticipantState) -> bool:
+        if prev.pips is None:
+            return True
+        tokens = prev.pips.tokens or []
+        if not tokens:
+            return True
+        return any(tok == "unknown" for tok in tokens)
+
+    def _detail_needs(prev: Optional[ParticipantState], occupied_now: bool) -> Tuple[bool, bool, bool, bool, Optional[float]]:
+        if not occupied_now:
+            return (False, False, False, False, None)
+        if prev is None or not prev.occupied:
+            return (not skip_name_ocr, not skip_health_ocr, True, True, ts)
+        if not _refresh_due(prev):
+            return (False, False, False, False, prev.details_checked_at)
+        need_name = _name_incomplete(prev) and (not skip_name_ocr)
+        need_health = _health_incomplete(prev) and (not skip_health_ocr)
+        need_school = _school_incomplete(prev)
+        need_pips = _pips_incomplete(prev)
+        if not (need_name or need_health or need_school or need_pips):
+            return (False, False, False, False, prev.details_checked_at)
+        return (need_name, need_health, need_school, need_pips, ts)
+
+    do_occupancy_check = True
+    if previous and previous.detected and previous.occupancy_checked_at is not None and occupancy_refresh_s > 0:
+        do_occupancy_check = (ts - previous.occupancy_checked_at) >= occupancy_refresh_s
+
+    use_batch_easyocr = (not skip_name_ocr) and cfg.ocr.backend == "easyocr"
+    sigil_info: Dict[Tuple[str, int], Tuple[Optional[str], Optional[float], Tuple[float, float, float, float]]] = {}
+    name_overrides: Dict[
+        Tuple[str, int],
+        Tuple[Optional[str], Optional[str], Optional[float], Optional[Tuple[float, float, float, float]]],
+    ] = {}
+    name_hash_overrides: Dict[Tuple[str, int], Optional[int]] = {}
+    detail_needs: Dict[Tuple[str, int], Tuple[bool, bool, bool, bool, Optional[float]]] = {}
+
     for i in range(profile.slots):
         enemy_roi = _shift_roi(profile.enemy_first_box, profile.enemy_spacing_x * i)
         if profile.ally_anchor == "right":
             ally_roi = _shift_roi(profile.ally_first_box, -profile.ally_spacing_x * i)
         else:
             ally_roi = _shift_roi(profile.ally_first_box, profile.ally_spacing_x * i)
-        prev_enemy = _prev_for("enemy", i) if (skip_health_ocr or skip_name_ocr) else None
-        prev_ally = _prev_for("ally", i) if (skip_health_ocr or skip_name_ocr) else None
+        for side, box_roi in (("enemy", enemy_roi), ("ally", ally_roi)):
+            is_enemy = side == "enemy"
+            prev = _prev_for(side, i) if previous else None
+            if do_occupancy_check:
+                sigil_rel = layout.sigil_roi_enemy if is_enemy else layout.sigil_roi_ally
+                sigil_roi = _sub_roi(box_roi, sigil_rel)
+                sigil_crop = crop_relative(frame_bgr, sigil_roi)
+                _dump_participant_roi(sigil_crop, kind="sigil", side=side, index=i, enabled=debug_dump_sigil_roi)
+                sigil_match, sigil_score = _detect_sigil(sigil_crop, cfg.sigil, bucket)
+            else:
+                sigil_match = prev.sigil if prev else None
+                sigil_score = prev.sigil_score if prev else None
+            sigil_info[(side, i)] = (sigil_match, sigil_score, box_roi)
+
+    if use_batch_easyocr:
+        name_items: List[_NameWorkItem] = []
+        for i in range(profile.slots):
+            enemy_roi = _shift_roi(profile.enemy_first_box, profile.enemy_spacing_x * i)
+            if profile.ally_anchor == "right":
+                ally_roi = _shift_roi(profile.ally_first_box, -profile.ally_spacing_x * i)
+            else:
+                ally_roi = _shift_roi(profile.ally_first_box, profile.ally_spacing_x * i)
+
+            for side, box_roi in (("enemy", enemy_roi), ("ally", ally_roi)):
+                is_enemy = side == "enemy"
+                prev = _prev_for(side, i) if previous else None
+                name_rel = layout.name_roi_enemy if is_enemy else layout.name_roi_ally
+                sigil_match, _, _ = sigil_info.get((side, i), (None, None, box_roi))
+                occupied_now = sigil_match is not None
+                needs = _detail_needs(prev, occupied_now)
+                detail_needs[(side, i)] = needs
+                need_name, _, _, _, _ = needs
+                if (not occupied_now) or (not need_name):
+                    continue
+                name_roi = _sub_roi(box_roi, name_rel)
+                cap_start = time.perf_counter()
+                name_crop = crop_relative(frame_bgr, name_roi)
+                capture_ms = (time.perf_counter() - cap_start) * 1000.0
+                name_hash = _name_roi_hash(name_crop)
+                name_hash_overrides[(side, i)] = name_hash
+                if prev is not None and name_hash is not None and prev.name_roi_hash == name_hash and (prev.name or prev.name_raw):
+                    name_time_parts = (capture_ms, 0.0, 0.0, 0.0)
+                    prev_final = prev.name or prev.name_raw
+                    prev_raw = prev.name_raw or prev.name
+                    name_overrides[(side, i)] = (prev_final, prev_raw, capture_ms, name_time_parts)
+                    detail_needs[(side, i)] = (False, needs[1], needs[2], needs[3], needs[4])
+                    continue
+                slot_dump_id = f"{debug_dump_id}_{side}_{i}" if debug_dump_id else None
+                name_items.append(
+                    _NameWorkItem(
+                        key=(side, i),
+                        crop=name_crop,
+                        tag=f"{side}_{i}_name",
+                        dump_id=slot_dump_id,
+                        start_time=time.perf_counter(),
+                        capture_ms=capture_ms,
+                    )
+                )
+        batch_results = _batch_easyocr_names(
+            name_items,
+            cfg.ocr,
+            debug_dump=debug_dump,
+            debug_dump_limit=debug_dump_limit,
+        )
+        name_overrides.update(batch_results)
+
+    for i in range(profile.slots):
+        enemy_roi = _shift_roi(profile.enemy_first_box, profile.enemy_spacing_x * i)
+        if profile.ally_anchor == "right":
+            ally_roi = _shift_roi(profile.ally_first_box, -profile.ally_spacing_x * i)
+        else:
+            ally_roi = _shift_roi(profile.ally_first_box, profile.ally_spacing_x * i)
+        prev_enemy = _prev_for("enemy", i) if previous else None
+        prev_ally = _prev_for("ally", i) if previous else None
+
+        enemy_name_raw = None
+        enemy_name_final = None
+        enemy_name_time = None
+        enemy_name_parts = None
+        enemy_name_hash = name_hash_overrides.get(("enemy", i)) if use_batch_easyocr else None
+        enemy_sigil, enemy_sigil_score, _ = sigil_info.get(("enemy", i), (None, None, enemy_roi))
+        enemy_needs = detail_needs.get(("enemy", i))
+        if use_batch_easyocr:
+            enemy_name_raw, enemy_name_final, enemy_name_time, enemy_name_parts = name_overrides.get(
+                ("enemy", i), (None, None, None, None)
+            )
+            if (enemy_name_final is None) and prev_enemy is not None:
+                enemy_name_final = prev_enemy.name or prev_enemy.name_raw
+                enemy_name_raw = prev_enemy.name_raw or prev_enemy.name
+
+        ally_name_raw = None
+        ally_name_final = None
+        ally_name_time = None
+        ally_name_parts = None
+        ally_name_hash = name_hash_overrides.get(("ally", i)) if use_batch_easyocr else None
+        ally_sigil, ally_sigil_score, _ = sigil_info.get(("ally", i), (None, None, ally_roi))
+        ally_needs = detail_needs.get(("ally", i))
+        if use_batch_easyocr:
+            ally_name_raw, ally_name_final, ally_name_time, ally_name_parts = name_overrides.get(
+                ("ally", i), (None, None, None, None)
+            )
+            if (ally_name_final is None) and prev_ally is not None:
+                ally_name_final = prev_ally.name or prev_ally.name_raw
+                ally_name_raw = prev_ally.name_raw or prev_ally.name
+
+        if enemy_needs is None:
+            occupied_now = enemy_sigil is not None
+            enemy_needs = _detail_needs(prev_enemy, occupied_now)
+        if ally_needs is None:
+            occupied_now = ally_sigil is not None
+            ally_needs = _detail_needs(prev_ally, occupied_now)
+
+        enemy_need_name, enemy_need_health, enemy_need_school, enemy_need_pips, enemy_details_at = enemy_needs
+        ally_need_name, ally_need_health, ally_need_school, ally_need_pips, ally_details_at = ally_needs
+
         enemies.append(
             _extract_participant(
                 frame_bgr,
@@ -2087,13 +2597,27 @@ def extract_participants(
                 i,
                 enemy_roi,
                 cfg,
-                skip_name_ocr=skip_name_ocr,
-                name_override=(prev_enemy.name if prev_enemy is not None else None),
-                name_raw_override=(prev_enemy.name_raw if prev_enemy is not None else None),
-                skip_health_ocr=skip_health_ocr,
+                skip_name_ocr=skip_name_ocr or use_batch_easyocr or (not enemy_need_name),
+                name_override=(
+                    enemy_name_final if use_batch_easyocr else (prev_enemy.name if prev_enemy is not None else None)
+                ),
+                name_raw_override=(
+                    enemy_name_raw if use_batch_easyocr else (prev_enemy.name_raw if prev_enemy is not None else None)
+                ),
+                name_time_override=(enemy_name_time if use_batch_easyocr else None),
+                name_time_parts_override=(enemy_name_parts if use_batch_easyocr else None),
+                name_hash_override=enemy_name_hash,
+                name_prev_hash=(prev_enemy.name_roi_hash if prev_enemy is not None else None),
+                skip_health_ocr=skip_health_ocr or (not enemy_need_health),
                 health_override=(
                     (prev_enemy.health_current, prev_enemy.health_max) if prev_enemy is not None else None
                 ),
+                skip_school_detect=(not enemy_need_school),
+                school_override=(prev_enemy.school if prev_enemy is not None else None),
+                school_score_override=(prev_enemy.school_score if prev_enemy is not None else None),
+                skip_pip_detect=(not enemy_need_pips),
+                pips_override=(prev_enemy.pips if prev_enemy is not None else None),
+                details_checked_at_override=(enemy_details_at if prev_enemy is not None else enemy_details_at),
                 occupied_override=(prev_enemy.occupied if prev_enemy is not None else None),
                 debug_dump=debug_dump,
                 debug_dump_health=debug_dump_health,
@@ -2102,6 +2626,9 @@ def extract_participants(
                 debug_dump_school_roi=debug_dump_school_roi,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
+                sigil_override=enemy_sigil,
+                sigil_score_override=enemy_sigil_score,
+                sigil_checked=True,
             )
         )
         allies.append(
@@ -2111,11 +2638,25 @@ def extract_participants(
                 i,
                 ally_roi,
                 cfg,
-                skip_name_ocr=skip_name_ocr,
-                name_override=(prev_ally.name if prev_ally is not None else None),
-                name_raw_override=(prev_ally.name_raw if prev_ally is not None else None),
-                skip_health_ocr=skip_health_ocr,
+                skip_name_ocr=skip_name_ocr or use_batch_easyocr or (not ally_need_name),
+                name_override=(
+                    ally_name_final if use_batch_easyocr else (prev_ally.name if prev_ally is not None else None)
+                ),
+                name_raw_override=(
+                    ally_name_raw if use_batch_easyocr else (prev_ally.name_raw if prev_ally is not None else None)
+                ),
+                name_time_override=(ally_name_time if use_batch_easyocr else None),
+                name_time_parts_override=(ally_name_parts if use_batch_easyocr else None),
+                name_hash_override=ally_name_hash,
+                name_prev_hash=(prev_ally.name_roi_hash if prev_ally is not None else None),
+                skip_health_ocr=skip_health_ocr or (not ally_need_health),
                 health_override=((prev_ally.health_current, prev_ally.health_max) if prev_ally is not None else None),
+                skip_school_detect=(not ally_need_school),
+                school_override=(prev_ally.school if prev_ally is not None else None),
+                school_score_override=(prev_ally.school_score if prev_ally is not None else None),
+                skip_pip_detect=(not ally_need_pips),
+                pips_override=(prev_ally.pips if prev_ally is not None else None),
+                details_checked_at_override=(ally_details_at if prev_ally is not None else ally_details_at),
                 occupied_override=(prev_ally.occupied if prev_ally is not None else None),
                 debug_dump=debug_dump,
                 debug_dump_health=debug_dump_health,
@@ -2124,6 +2665,9 @@ def extract_participants(
                 debug_dump_school_roi=debug_dump_school_roi,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
+                sigil_override=ally_sigil,
+                sigil_score_override=ally_sigil_score,
+                sigil_checked=True,
             )
         )
 
@@ -2131,6 +2675,7 @@ def extract_participants(
     state.allies = allies
     state.profile = bucket
     state.detected = True
+    state.occupancy_checked_at = ts if do_occupancy_check else (previous.occupancy_checked_at if previous else None)
     return state
 
 
@@ -2141,11 +2686,16 @@ def render_participants_overlay(
     draw_sub_rois: bool = True,
     show_pip_detection: bool = False,
     initiative_side: Optional[str] = None,
+    show_empty: bool = True,
+    show_legend: bool = True,
 ) -> np.ndarray:
     vis = frame_bgr.copy()
     aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0]) if frame_bgr.size else "unknown"
-    _draw_participants_legend(vis, initiative_side, aspect_key)
+    if show_legend:
+        _draw_participants_legend(vis, initiative_side, aspect_key)
     for p in state.enemies + state.allies:
+        if (not show_empty) and (not p.occupied):
+            continue
         box_color = (0, 255, 255) if p.occupied else (128, 128, 128)
         draw_relative_roi(vis, p.rel_roi, None, color=box_color, copy=False)
         _draw_box_label(vis, p)

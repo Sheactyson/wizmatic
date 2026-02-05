@@ -12,6 +12,9 @@ class InitiativeState:
     dagger_off_score: float = 0.0
     profile: Optional[str] = None
     method: Optional[str] = None
+    stable_side: Optional[str] = None
+    stable_since: Optional[float] = None
+    last_checked_at: Optional[float] = None
 
 
 @dataclass
@@ -61,6 +64,10 @@ class ParticipantState:
     sigil_score: Optional[float] = None
     name: Optional[str] = None
     name_raw: Optional[str] = None
+    name_time_ms: Optional[float] = None
+    name_time_parts: Optional[Tuple[float, float, float, float]] = None
+    name_roi_hash: Optional[int] = None
+    details_checked_at: Optional[float] = None
     health_current: Optional[int] = None
     health_max: Optional[int] = None
     school: Optional[str] = None
@@ -82,11 +89,13 @@ class ParticipantsState:
     profile: Optional[str] = None
     detected: bool = False
     timestamp: Optional[float] = None
+    occupancy_checked_at: Optional[float] = None
 
 
 @dataclass
 class BattleState:
     in_card_select: bool = False
+    card_select_started_at: Optional[float] = None
     initiative: InitiativeState = field(default_factory=InitiativeState)
     turn_order: TurnOrderState = field(default_factory=TurnOrderState)
     participants: ParticipantsState = field(default_factory=ParticipantsState)
