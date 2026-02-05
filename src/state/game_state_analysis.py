@@ -86,6 +86,8 @@ def analyze_game_state(
     debug_dump_ocr: bool = False,
     debug_dump_health_roi: bool = False,
     debug_dump_empty_names: bool = False,
+    debug_dump_sigil_roi: bool = False,
+    debug_dump_school_roi: bool = False,
     debug_dump_ocr_id: Optional[str] = None,
     debug_dump_ocr_limit: int = 0,
 ) -> AnalysisResult:
@@ -201,6 +203,8 @@ def analyze_game_state(
                 debug_dump=debug_dump_ocr,
                 debug_dump_health=debug_dump_health_roi,
                 debug_dump_empty_names=debug_dump_empty_names,
+                debug_dump_sigil_roi=debug_dump_sigil_roi,
+                debug_dump_school_roi=debug_dump_school_roi,
                 debug_dump_id=debug_dump_ocr_id,
                 debug_dump_limit=debug_dump_ocr_limit,
             )

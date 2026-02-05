@@ -19,6 +19,8 @@ except Exception:  # pragma: no cover - allow import failure in minimal envs
 
 _OCR_DUMP_DIR = Path("debug/ocr")
 _OCR_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+_PARTICIPANT_DUMP_DIR = Path("debug/participants")
+_PARTICIPANT_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 _OCR_DUMP_COUNTS: Dict[str, int] = {}
 _WORDLIST_CACHE: Dict[str, List[str]] = {}
 _WORDLIST_NORM_CACHE: Dict[str, List[str]] = {}
@@ -38,6 +40,10 @@ class ParticipantBoxProfile:
 
 @dataclass(frozen=True)
 class ParticipantLayout:
+    sigil_roi_enemy: Tuple[float, float, float, float]
+    sigil_roi_ally: Tuple[float, float, float, float]
+    school_roi_enemy: Tuple[float, float, float, float]
+    school_roi_ally: Tuple[float, float, float, float]
     name_roi_enemy: Tuple[float, float, float, float]
     health_roi_enemy: Tuple[float, float, float, float]
     name_roi_ally: Tuple[float, float, float, float]
@@ -55,6 +61,18 @@ class PipDetectConfig:
     min_area_frac: float = 0.002
     max_area_frac: float = 0.05
     templates_base_dir: str = "src/assets/pips"
+    template_threshold: float = 0.7
+
+
+@dataclass(frozen=True)
+class SigilDetectConfig:
+    templates_base_dir: str = "src/assets/participants/sigils"
+    template_threshold: float = 0.7
+
+
+@dataclass(frozen=True)
+class SchoolDetectConfig:
+    templates_base_dir: str = "src/assets/participants/schools"
     template_threshold: float = 0.7
 
 
@@ -86,6 +104,8 @@ class ParticipantsConfig:
     layout: ParticipantLayout
     pip: PipDetectConfig
     ocr: OCRConfig
+    sigil: SigilDetectConfig
+    school: SchoolDetectConfig
 
 
 def _aspect_bucket(aspect: float) -> str:
@@ -456,6 +476,23 @@ def _dump_health_roi(
                     continue
                 prep_path = _OCR_DUMP_DIR / f"health_roi_{side}_{index}_{stamp}_{suffix}.png"
                 cv2.imwrite(str(prep_path), img)
+    except Exception:
+        pass
+
+
+def _dump_participant_roi(
+    crop: np.ndarray,
+    *,
+    kind: str,
+    side: str,
+    index: int,
+    enabled: bool,
+) -> None:
+    if not enabled or crop.size == 0:
+        return
+    try:
+        path = _PARTICIPANT_DUMP_DIR / f"{kind}_{side}_{index}.png"
+        cv2.imwrite(str(path), crop)
     except Exception:
         pass
 
@@ -1496,6 +1533,8 @@ def _count_blobs(mask: np.ndarray, min_area: int, max_area: int) -> int:
 
 
 _PIP_TEMPLATE_CACHE: Dict[str, List[Tuple[str, np.ndarray]]] = {}
+_SIGIL_TEMPLATE_CACHE: Dict[str, List[Tuple[str, np.ndarray]]] = {}
+_SCHOOL_TEMPLATE_CACHE: Dict[str, List[Tuple[str, np.ndarray]]] = {}
 
 
 def _template_suffixes_for_aspect(aspect_key: str) -> Tuple[str, ...]:
@@ -1506,6 +1545,115 @@ def _template_suffixes_for_aspect(aspect_key: str) -> Tuple[str, ...]:
     if aspect_key == "43:18":
         return ("_43x18",)
     return ("_16x9",)
+
+
+def _load_named_templates(
+    base_dir: str,
+    aspect_key: str,
+    cache: Dict[str, List[Tuple[str, np.ndarray]]],
+    *,
+    suffixes: Optional[Tuple[str, ...]] = None,
+    cache_key_suffix: Optional[str] = None,
+    allow_fallback: bool = True,
+) -> List[Tuple[str, np.ndarray]]:
+    base = Path(base_dir)
+    cache_key = f"{base.resolve()}::{aspect_key}"
+    if cache_key_suffix:
+        cache_key = f"{cache_key}::{cache_key_suffix}"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    if not base.exists():
+        cache[cache_key] = []
+        return []
+
+    suffixes = suffixes or _template_suffixes_for_aspect(aspect_key)
+    templates: List[Tuple[str, np.ndarray]] = []
+    fallback: List[Tuple[str, np.ndarray]] = []
+    for folder in sorted(p for p in base.iterdir() if p.is_dir()):
+        label = folder.name.lower()
+        for png in sorted(folder.glob("*.png")):
+            stem = png.stem.strip().lower()
+            img = cv2.imread(str(png), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            if any(stem.endswith(suf) for suf in suffixes):
+                templates.append((label, img))
+            else:
+                fallback.append((label, img))
+
+    if allow_fallback and (not templates) and fallback:
+        templates = fallback
+
+    cache[cache_key] = templates
+    return templates
+
+
+def _ensure_gray(img: np.ndarray) -> np.ndarray:
+    if img.size == 0:
+        return img
+    if len(img.shape) == 2:
+        return img
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def _match_named_template(
+    crop_bgr: np.ndarray,
+    templates: List[Tuple[str, np.ndarray]],
+    threshold: float,
+) -> Tuple[Optional[str], float]:
+    if crop_bgr.size == 0 or not templates:
+        return None, 0.0
+    crop_gray = _ensure_gray(crop_bgr)
+    best_name = None
+    best_score = -1.0
+    for name, templ in templates:
+        try:
+            resized = cv2.resize(crop_gray, (templ.shape[1], templ.shape[0]), interpolation=cv2.INTER_AREA)
+        except Exception:
+            continue
+        res = cv2.matchTemplate(resized, templ, cv2.TM_CCOEFF_NORMED)
+        score = float(res[0][0])
+        if score > best_score:
+            best_score = score
+            best_name = name
+    if best_score >= threshold:
+        return best_name, best_score
+    return None, best_score
+
+
+def _detect_sigil(
+    sigil_bgr: np.ndarray,
+    cfg: SigilDetectConfig,
+    aspect_key: str,
+) -> Tuple[Optional[str], float]:
+    templates = _load_named_templates(cfg.templates_base_dir, aspect_key, _SIGIL_TEMPLATE_CACHE)
+    return _match_named_template(sigil_bgr, templates, cfg.template_threshold)
+
+
+def _school_template_suffixes(aspect_key: str, side: str) -> Tuple[str, ...]:
+    side = (side or "").lower()
+    if side not in ("ally", "enemy"):
+        return _template_suffixes_for_aspect(aspect_key)
+    suffixes = _template_suffixes_for_aspect(aspect_key)
+    return tuple(f"_{side}{suf}" for suf in suffixes)
+
+
+def _detect_school(
+    school_bgr: np.ndarray,
+    cfg: SchoolDetectConfig,
+    aspect_key: str,
+    side: str,
+) -> Tuple[Optional[str], float]:
+    templates = _load_named_templates(
+        cfg.templates_base_dir,
+        aspect_key,
+        _SCHOOL_TEMPLATE_CACHE,
+        suffixes=_school_template_suffixes(aspect_key, side),
+        cache_key_suffix=side,
+        allow_fallback=False,
+    )
+    return _match_named_template(school_bgr, templates, cfg.template_threshold)
 
 
 def _load_pip_templates(cfg: PipDetectConfig, aspect_key: str) -> List[Tuple[str, np.ndarray]]:
@@ -1675,23 +1823,60 @@ def _extract_participant(
     debug_dump: bool = False,
     debug_dump_health: bool = False,
     debug_dump_empty_names: bool = False,
+    debug_dump_sigil_roi: bool = False,
+    debug_dump_school_roi: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
 ) -> ParticipantState:
     slot_dump_id = f"{debug_dump_id}_{side}_{index}" if debug_dump_id else None
     layout = cfg.layout
     is_enemy = side == "enemy"
+    aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0])
 
+    sigil_rel = layout.sigil_roi_enemy if is_enemy else layout.sigil_roi_ally
+    school_rel = layout.school_roi_enemy if is_enemy else layout.school_roi_ally
     name_rel = layout.name_roi_enemy if is_enemy else layout.name_roi_ally
     health_rel = layout.health_roi_enemy if is_enemy else layout.health_roi_ally
     pips_rel = layout.pips_roi_enemy if is_enemy else layout.pips_roi_ally
 
+    sigil_roi = _sub_roi(box_roi, sigil_rel)
+    school_roi = _sub_roi(box_roi, school_rel)
     name_roi = _sub_roi(box_roi, name_rel)
     health_roi = _sub_roi(box_roi, health_rel)
     pips_roi = _sub_roi(box_roi, pips_rel)
+
+    sigil_crop = crop_relative(frame_bgr, sigil_roi)
+    _dump_participant_roi(sigil_crop, kind="sigil", side=side, index=index, enabled=debug_dump_sigil_roi)
+    sigil_match, sigil_score = _detect_sigil(sigil_crop, cfg.sigil, aspect_key)
+    if sigil_match is None:
+        return ParticipantState(
+            side=side,
+            index=index,
+            rel_roi=box_roi,
+            sigil=sigil_match,
+            sigil_score=sigil_score,
+            name=None,
+            name_raw=None,
+            health_current=None,
+            health_max=None,
+            school=None,
+            school_score=None,
+            pips=PipInventory(),
+            occupied=False,
+            empty_reason="sigil missing",
+            name_roi=name_roi,
+            health_roi=health_roi,
+            pips_roi=pips_roi,
+            sigil_roi=sigil_roi,
+            school_roi=school_roi,
+        )
+
     name_crop = crop_relative(frame_bgr, name_roi)
     health_crop = crop_relative(frame_bgr, health_roi)
     pips_crop = crop_relative(frame_bgr, pips_roi)
+    school_crop = crop_relative(frame_bgr, school_roi)
+    _dump_participant_roi(school_crop, kind="school", side=side, index=index, enabled=debug_dump_school_roi)
+    school_match, school_score = _detect_school(school_crop, cfg.school, aspect_key, side)
 
     if debug_dump_health and index == 0 and side in ("enemy", "ally"):
         prepped = None
@@ -1811,30 +1996,8 @@ def _extract_participant(
         name_raw = name_text
         name_text = _apply_wordlist_correction(name_text, cfg.ocr)
 
-    empty_reason = None
-    if name_text is None or not str(name_text).strip():
-        empty_reason = "name missing"
-    elif _normalize_ocr_compare(name_text) == "UNKNOWN":
-        empty_reason = "name unknown"
-
-    if empty_reason:
-        if (not skip_name_ocr) and debug_dump and (not debug_dump_empty_names) and debug_dump_id:
-            _remove_ocr_dumps_with_prefix(tag, dump_id=slot_dump_id)
-        return ParticipantState(
-            side=side,
-            index=index,
-            rel_roi=box_roi,
-            name=None,
-            name_raw=name_raw,
-            health_current=None,
-            health_max=None,
-            pips=PipInventory(),
-            occupied=False,
-            empty_reason=empty_reason,
-            name_roi=name_roi,
-            health_roi=health_roi,
-            pips_roi=pips_roi,
-        )
+    if (not skip_name_ocr) and (not name_text) and debug_dump and (not debug_dump_empty_names) and debug_dump_id:
+        _remove_ocr_dumps_with_prefix(tag, dump_id=slot_dump_id)
 
     if skip_health_ocr:
         if health_override is None:
@@ -1843,43 +2006,28 @@ def _extract_participant(
             health_current, health_max = health_override
     else:
         health_current, health_max = _ocr_health(health_crop, cfg.ocr)
-    occupied = health_current is not None or health_max is not None
-    if not occupied and skip_health_ocr and occupied_override is not None:
-        occupied = occupied_override
-    if not occupied:
-        return ParticipantState(
-            side=side,
-            index=index,
-            rel_roi=box_roi,
-            name=None,
-            name_raw=name_raw,
-            health_current=None,
-            health_max=None,
-            pips=PipInventory(),
-            occupied=False,
-            empty_reason="no health",
-            name_roi=name_roi,
-            health_roi=health_roi,
-            pips_roi=pips_roi,
-        )
-
-    aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0])
     pips = _pip_counts(pips_crop, cfg.pip, aspect_key)
 
     return ParticipantState(
         side=side,
         index=index,
         rel_roi=box_roi,
+        sigil=sigil_match,
+        sigil_score=sigil_score,
         name=name_text,
         name_raw=name_raw,
         health_current=health_current,
         health_max=health_max,
+        school=school_match,
+        school_score=school_score,
         pips=pips,
-        occupied=occupied,
+        occupied=True,
         empty_reason=None,
         name_roi=name_roi,
         health_roi=health_roi,
         pips_roi=pips_roi,
+        sigil_roi=sigil_roi,
+        school_roi=school_roi,
     )
 
 
@@ -1894,6 +2042,8 @@ def extract_participants(
     debug_dump: bool = False,
     debug_dump_health: bool = False,
     debug_dump_empty_names: bool = False,
+    debug_dump_sigil_roi: bool = False,
+    debug_dump_school_roi: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
 ) -> ParticipantsState:
@@ -1948,6 +2098,8 @@ def extract_participants(
                 debug_dump=debug_dump,
                 debug_dump_health=debug_dump_health,
                 debug_dump_empty_names=debug_dump_empty_names,
+                debug_dump_sigil_roi=debug_dump_sigil_roi,
+                debug_dump_school_roi=debug_dump_school_roi,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
             )
@@ -1968,6 +2120,8 @@ def extract_participants(
                 debug_dump=debug_dump,
                 debug_dump_health=debug_dump_health,
                 debug_dump_empty_names=debug_dump_empty_names,
+                debug_dump_sigil_roi=debug_dump_sigil_roi,
+                debug_dump_school_roi=debug_dump_school_roi,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
             )
@@ -1992,21 +2146,22 @@ def render_participants_overlay(
     aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0]) if frame_bgr.size else "unknown"
     _draw_participants_legend(vis, initiative_side, aspect_key)
     for p in state.enemies + state.allies:
-        if not p.occupied:
-            draw_relative_roi(vis, p.rel_roi, None, color=(128, 128, 128), copy=False)
-            _draw_box_label(vis, p)
-            continue
-
-        draw_relative_roi(vis, p.rel_roi, None, color=(0, 255, 255), copy=False)
+        box_color = (0, 255, 255) if p.occupied else (128, 128, 128)
+        draw_relative_roi(vis, p.rel_roi, None, color=box_color, copy=False)
         _draw_box_label(vis, p)
         if draw_sub_rois:
-            if p.name_roi:
-                draw_relative_roi(vis, p.name_roi, None, color=(255, 0, 0), copy=False)
-            if p.health_roi:
-                draw_relative_roi(vis, p.health_roi, None, color=(0, 255, 0), copy=False)
-            if p.pips_roi:
-                draw_relative_roi(vis, p.pips_roi, None, color=(255, 255, 0), copy=False)
-        if show_pip_detection and p.pips is not None:
+            if p.sigil_roi:
+                draw_relative_roi(vis, p.sigil_roi, None, color=(255, 0, 255), copy=False)
+            if p.occupied:
+                if p.school_roi:
+                    draw_relative_roi(vis, p.school_roi, None, color=(0, 165, 255), copy=False)
+                if p.name_roi:
+                    draw_relative_roi(vis, p.name_roi, None, color=(255, 0, 0), copy=False)
+                if p.health_roi:
+                    draw_relative_roi(vis, p.health_roi, None, color=(0, 255, 0), copy=False)
+                if p.pips_roi:
+                    draw_relative_roi(vis, p.pips_roi, None, color=(255, 255, 0), copy=False)
+        if show_pip_detection and p.pips is not None and p.occupied:
             _draw_pip_tokens(vis, p)
     return vis
 
@@ -2027,6 +2182,8 @@ def _draw_participants_legend(vis: np.ndarray, initiative_side: Optional[str], a
 
     lines = [
         ("box", (0, 255, 255)),
+        ("sigil", (255, 0, 255)),
+        ("school", (0, 165, 255)),
         ("name", (255, 0, 0)),
         ("hp", (0, 255, 0)),
         ("pips", (255, 255, 0)),
@@ -2071,7 +2228,7 @@ def _draw_box_label(vis: np.ndarray, participant: ParticipantState) -> None:
     px2 = int(x2 * w)
     py2 = int(y2 * h)
 
-    sigil = _sigil_name(participant)
+    sigil = participant.sigil or _sigil_name(participant)
     empty = not participant.occupied
 
     if empty:
@@ -2081,9 +2238,11 @@ def _draw_box_label(vis: np.ndarray, participant: ParticipantState) -> None:
         name = participant.name or "unknown"
         cur = "?" if participant.health_current is None else str(participant.health_current)
         maxv = "?" if participant.health_max is None else str(participant.health_max)
+        school = participant.school or "unknown"
         lines = [
             f"{sigil} | {name}",
             f"hp {cur}/{maxv}",
+            f"school {school}",
             "",  # placeholder for pip list line
         ]
 
@@ -2104,9 +2263,10 @@ def _draw_box_label(vis: np.ndarray, participant: ParticipantState) -> None:
             y = py1 - 6
 
     x = px1
+    pip_line_idx = len(lines) - 1
     for i, text in enumerate(lines):
         ty = y - (total_h - line_h) + i * line_h
-        if i == 2 and not empty:
+        if (not empty) and i == pip_line_idx:
             _draw_pip_list_line(vis, participant, x, ty, font, scale, thickness)
             continue
         cv2.putText(vis, text, (x, ty), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)

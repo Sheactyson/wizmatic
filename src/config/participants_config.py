@@ -1,6 +1,12 @@
 from config.roi_config import PARTICIPANT_BOX_PROFILES, PARTICIPANT_LAYOUT
 from config.wizmatic_config import OCR_BACKEND
-from state.participants import ParticipantsConfig, PipDetectConfig, OCRConfig
+from state.participants import (
+    ParticipantsConfig,
+    PipDetectConfig,
+    OCRConfig,
+    SigilDetectConfig,
+    SchoolDetectConfig,
+)
 
 
 PIP_DETECT_CFG = PipDetectConfig(
@@ -34,9 +40,23 @@ OCR_CFG = OCRConfig(
 )
 
 
+SIGIL_DETECT_CFG = SigilDetectConfig(
+    templates_base_dir="src/assets/participants/sigils",
+    template_threshold=0.7,
+)
+
+
+SCHOOL_DETECT_CFG = SchoolDetectConfig(
+    templates_base_dir="src/assets/participants/schools",
+    template_threshold=0.7,
+)
+
+
 PARTICIPANTS_CFG = ParticipantsConfig(
     profiles=PARTICIPANT_BOX_PROFILES,
     layout=PARTICIPANT_LAYOUT,
     pip=PIP_DETECT_CFG,
     ocr=OCR_CFG,
+    sigil=SIGIL_DETECT_CFG,
+    school=SCHOOL_DETECT_CFG,
 )

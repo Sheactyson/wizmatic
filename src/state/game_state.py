@@ -57,16 +57,22 @@ class ParticipantState:
     side: str = "unknown"  # "enemy" or "ally"
     index: int = -1
     rel_roi: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    sigil: Optional[str] = None
+    sigil_score: Optional[float] = None
     name: Optional[str] = None
     name_raw: Optional[str] = None
     health_current: Optional[int] = None
     health_max: Optional[int] = None
+    school: Optional[str] = None
+    school_score: Optional[float] = None
     pips: PipInventory = field(default_factory=PipInventory)
     occupied: bool = False
     empty_reason: Optional[str] = None
     name_roi: Optional[Tuple[float, float, float, float]] = None
     health_roi: Optional[Tuple[float, float, float, float]] = None
     pips_roi: Optional[Tuple[float, float, float, float]] = None
+    sigil_roi: Optional[Tuple[float, float, float, float]] = None
+    school_roi: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass

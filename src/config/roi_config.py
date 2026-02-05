@@ -46,36 +46,40 @@ TURN_ORDER_ROI_CFG = TurnOrderROIConfig()
 
 PARTICIPANT_BOX_PROFILES: Dict[str, ParticipantBoxProfile] = {
     "4:3": ParticipantBoxProfile(
-        enemy_first_box=(0.049, 0.001, 0.170, 0.108),
-        ally_first_box=(0.110, 0.839, 0.232, 0.992),
-        enemy_spacing_x=0.222,
-        ally_spacing_x=0.217,
+        enemy_first_box=(0.078, 0.000, 0.28, 0.115),
+        ally_first_box=(0.763, 0.855, 0.96, 1.000),
+        enemy_spacing_x=0.201,
+        ally_spacing_x=0.1935,
         ally_anchor="right",
     ),
     "16:9": ParticipantBoxProfile(
-        enemy_first_box=(0.04, 0.000, 0.160, 0.08),
-        ally_first_box=(0.755, 0.895, 0.870, 1.000),
-        enemy_spacing_x=0.225,
-        ally_spacing_x=0.221,
+        enemy_first_box=(0.057, 0.000, 0.21, 0.115),
+        ally_first_box=(0.76, 0.855, 0.910, 1.000),
+        enemy_spacing_x=0.2138,
+        ally_spacing_x=0.2088,
         ally_anchor="right",
     ),
     "43:18": ParticipantBoxProfile(
-        enemy_first_box=(0.049, 0.001, 0.170, 0.108),
-        ally_first_box=(0.110, 0.839, 0.232, 0.992),
-        enemy_spacing_x=0.222,
-        ally_spacing_x=0.217,
+        enemy_first_box=(0.042, 0.000, 0.157, 0.115),
+        ally_first_box=(0.7555, 0.855, 0.868, 1.000),
+        enemy_spacing_x=0.223,
+        ally_spacing_x=0.2185,
         ally_anchor="right",
     ),
 }
 
 
 PARTICIPANT_LAYOUT = ParticipantLayout(
-    name_roi_enemy=(0.29, 0.25, 0.86, 0.52),
-    health_roi_enemy=(0.285, 0.50, 0.86, 0.79),
-    name_roi_ally=(0.31, 0.25, 0.90, 0.50),
-    health_roi_ally=(0.305, 0.475, 0.90, 0.69),
-    pips_roi_enemy=(0.10, 0.00, 0.94, 0.20),
-    pips_roi_ally=(0.25, 0.67, 0.945, 0.95),
+    sigil_roi_enemy=(0.07, 0.45, 0.28, 0.75),
+    sigil_roi_ally=(0.07, 0.25, 0.28, 0.55),
+    school_roi_enemy=(0.00, 0.05, 0.15, 0.35),
+    school_roi_ally=(0.00, 0.60, 0.15, 0.85),
+    name_roi_enemy=(0.31, 0.25, 0.985, 0.52),
+    health_roi_enemy=(0.31, 0.50, 0.985, 0.79),
+    name_roi_ally=(0.32, 0.25, 0.90, 0.50),
+    health_roi_ally=(0.32, 0.475, 0.92, 0.67),
+    pips_roi_enemy=(0.25, 0.00, 0.985, 0.25),
+    pips_roi_ally=(0.25, 0.67, 0.99, 0.95),
 )
 
 
