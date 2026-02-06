@@ -94,6 +94,7 @@ class ParticipantsState:
 
 @dataclass
 class BattleState:
+    active: bool = False
     in_card_select: bool = False
     card_select_started_at: Optional[float] = None
     initiative: InitiativeState = field(default_factory=InitiativeState)
@@ -104,4 +105,5 @@ class BattleState:
 @dataclass
 class GameState:
     updated_at: float = 0.0
+    state: str = "idle"
     battle: BattleState = field(default_factory=BattleState)

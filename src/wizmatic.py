@@ -20,16 +20,19 @@ from config.wizmatic_config import (
     DEBUG_DUMP_INITIATIVE_ROI,
     DEBUG_DUMP_SIGIL_ROI,
     DEBUG_DUMP_SCHOOL_ROI,
+    DEBUG_DUMP_BUTTON_ROI,
     OCR_BACKEND,
     MASTER_OVERLAY_SHOW_PARTICIPANTS,
     MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND,
     MASTER_OVERLAY_HIDE_EMPTY_SLOTS,
     MASTER_OVERLAY_SHOW_INITIATIVE,
     MASTER_OVERLAY_SHOW_PIPS,
+    MASTER_OVERLAY_SHOW_BUTTON_LIST,
 )
 from config.participants_config import PARTICIPANTS_CFG
 from state.initiative import render_initiative_boxes
 from state.participants import render_participants_overlay
+from utils.roi import draw_status_list
 
 def main():
     if OCR_BACKEND == "easyocr":
@@ -42,7 +45,7 @@ def main():
     frames = FrameSource(cap, hz=60)
     frames.start()
 
-    state_cardSelect_last = None
+    state_last = None
     debug_ocr_session_id = 0
     game_state = GameState()
     gui_ok = True
@@ -72,6 +75,16 @@ def main():
             _disable_gui(exc)
             return False
 
+    def _format_state_label(state: str) -> str:
+        labels = {
+            "loading": "Loading Screen",
+            "idle": "Idle",
+            "battle": "Battle",
+            "card_select": "Card Select",
+            "round_animation": "Round Animation",
+        }
+        return labels.get(state, state.title())
+
     def _draw_state_indicator(vis, label: str) -> None:
         h, w = vis.shape[:2]
         if h == 0 or w == 0:
@@ -87,6 +100,38 @@ def main():
         cv2.rectangle(vis, (x - pad, y - th - pad), (x + tw + pad, y + pad), (0, 0, 0), -1)
         cv2.putText(vis, label, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
+    def _participants_legend_bottom(h: int, w: int) -> int:
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.45
+        thickness = 1
+        line_h = 16
+        pad = 6
+        init_label = "initiative: unknown"
+        aspect_label = "aspect: unknown"
+        lines = [
+            "box",
+            "sigil",
+            "school",
+            "name",
+            "hp",
+            "pips",
+            init_label,
+            aspect_label,
+        ]
+        x = max(8, int(w * 0.03))
+        y = int(h * 0.45)
+        max_width = 0
+        for label in lines:
+            (tw, _), _ = cv2.getTextSize(label, font, scale, thickness)
+            if tw > max_width:
+                max_width = tw
+        box_w = max_width + pad * 2
+        box_h = line_h * len(lines) + pad
+        _ = box_w
+        top = y - line_h + 2
+        bottom = top + box_h
+        return bottom
+
     try:
         while True:
             t0 = time.perf_counter()
@@ -100,6 +145,7 @@ def main():
                 render_participants = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PARTICIPANTS_OVERLAY
                 render_buttons = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_BUTTON_OVERLAY
                 render_pips = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PIPDETECTION_OVERLAY
+                collect_buttons = MASTER_OVERLAY_SHOW_BUTTON_LIST
                 result = analyze_game_state(
                     analysis,
                     game_state,
@@ -109,6 +155,8 @@ def main():
                     render_participants=render_participants,
                     render_pip_detection=render_pips,
                     render_button_overlay=render_buttons,
+                    debug_dump_button_rois=DEBUG_DUMP_BUTTON_ROI,
+                    collect_button_state=collect_buttons,
                     debug_dump_initiative_roi=DEBUG_DUMP_INITIATIVE_ROI,
                     debug_dump_ocr=DEBUG_DUMP_OCR,
                     debug_dump_health_roi=DEBUG_DUMP_HEALTH_ROI,
@@ -119,13 +167,14 @@ def main():
                     debug_dump_ocr_limit=DEBUG_DUMP_OCR_MAX,
                 )
                 game_state = result.game_state
-                state_cardSelect_current = result.in_card_select
+                state_current = game_state.state
+                in_card_select = game_state.battle.in_card_select
 
                 if SHOW_MASTER_DEBUG_OVERLAY:
                     master = analysis.copy()
-                    state_label = "Card Select" if state_cardSelect_current else "Idle"
+                    state_label = _format_state_label(state_current)
                     _draw_state_indicator(master, state_label)
-                    if state_cardSelect_current:
+                    if in_card_select:
                         if MASTER_OVERLAY_SHOW_PARTICIPANTS:
                             master = render_participants_overlay(
                                 master,
@@ -137,6 +186,20 @@ def main():
                             )
                         if MASTER_OVERLAY_SHOW_INITIATIVE:
                             master = render_initiative_boxes(master, INITIATIVE_CFG, game_state.battle.initiative)
+                    if MASTER_OVERLAY_SHOW_BUTTON_LIST and result.button_states:
+                        h, w = master.shape[:2]
+                        x = max(8, int(w * 0.03))
+                        if in_card_select and MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND:
+                            y = _participants_legend_bottom(h, w) + 16
+                        else:
+                            y = int(h * 0.2)
+                        order = ["crownsShop", "upgradeNow", "friends", "social", "spellBook", "pass", "flee"]
+                        items = []
+                        for key in order:
+                            hit = result.button_states.get(key, False)
+                            color = (0, 255, 0) if hit else (0, 0, 255)
+                            items.append((key, color))
+                        draw_status_list(master, items, x=x, y=y, copy=False)
                     _safe_imshow("wizmatic:master", master)
                 else:
                     if SHOW_INITIATIVE_OVERLAY and result.initiative_overlay is not None:
@@ -146,9 +209,9 @@ def main():
                     if SHOW_BUTTON_OVERLAY and result.button_overlay is not None:
                         _safe_imshow("wizmatic:buttons", result.button_overlay)
 
-                if(state_cardSelect_last != state_cardSelect_current):
-                    state_cardSelect_last = state_cardSelect_current
-                    if result.pass_found or result.flee_found:
+                if state_last != state_current:
+                    state_last = state_current
+                    if state_current == "card_select":
                         # Card Selection logic
                         print("Card Select Mode")
                         debug_ocr_session_id += 1
@@ -174,8 +237,7 @@ def main():
                                 else:
                                     print(f"[ocr:name] {p.side} {p.index}: {raw} -> {final}")
                     else:
-                        # Idle logic
-                        print("Idle Mode")
+                        print(f"{_format_state_label(state_current)} Mode")
 
                 # If debug windows are open, close them:
                 if _safe_wait_key():

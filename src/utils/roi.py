@@ -140,3 +140,45 @@ def draw_relative_roi(
         for (rx1, ry1, rx2, ry2), patch in zip(restore_boxes, restore_copies):
             vis[ry1:ry2, rx1:rx2] = patch
     return vis
+
+
+def draw_status_list(
+    frame_bgr: np.ndarray,
+    items: List[Tuple[str, Tuple[int, int, int]]],
+    *,
+    x: int,
+    y: int,
+    line_h: int = 16,
+    pad: int = 6,
+    font_scale: float = 0.45,
+    thickness: int = 1,
+    alpha: float = 0.3,
+    copy: bool = False,
+) -> np.ndarray:
+    if not items:
+        return frame_bgr
+    vis = frame_bgr.copy() if copy else frame_bgr
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    max_width = 0
+    for label, _ in items:
+        (tw, _), _ = cv2.getTextSize(label, font, font_scale, thickness)
+        if tw > max_width:
+            max_width = tw
+    box_w = max_width + pad * 2
+    box_h = line_h * len(items) + pad
+    x = max(2, x)
+    y = max(line_h, y)
+    overlay = vis.copy()
+    cv2.rectangle(
+        overlay,
+        (x - pad, y - line_h + 2),
+        (x - pad + box_w, y - line_h + 2 + box_h),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0, vis)
+    cy = y
+    for label, color in items:
+        cv2.putText(vis, label, (x, cy), font, font_scale, color, thickness, cv2.LINE_AA)
+        cy += line_h
+    return vis
