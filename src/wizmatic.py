@@ -1,4 +1,5 @@
 import time
+from typing import Optional
 import cv2
 from utils.capture_wiz import Wizard101Capture
 from utils.capture_thread import FrameSource
@@ -32,7 +33,6 @@ from config.wizmatic_config import (
 from config.participants_config import PARTICIPANTS_CFG
 from state.initiative import render_initiative_boxes
 from state.participants import render_participants_overlay
-from utils.roi import draw_status_list
 
 def main():
     if OCR_BACKEND == "easyocr":
@@ -85,20 +85,68 @@ def main():
         }
         return labels.get(state, state.title())
 
-    def _draw_state_indicator(vis, label: str) -> None:
+    def _draw_state_and_buttons(
+        vis,
+        label: str,
+        button_states: Optional[dict],
+        *,
+        show_buttons: bool,
+    ) -> None:
         h, w = vis.shape[:2]
         if h == 0 or w == 0:
             return
         font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.8
-        thickness = 2
-        (tw, th), _ = cv2.getTextSize(label, font, scale, thickness)
-        pad = 8
-        x = max(2, w - tw - pad - 2)
-        y = int(h * 0.5)
-        y = max(th + pad, min(h - 2, y))
-        cv2.rectangle(vis, (x - pad, y - th - pad), (x + tw + pad, y + pad), (0, 0, 0), -1)
-        cv2.putText(vis, label, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        state_scale = 0.7
+        state_thickness = 2
+        item_scale = 0.45
+        item_thickness = 1
+        pad = 6
+        margin = 8
+        alpha = 0.35
+        gold = (0, 215, 255)
+        green = (0, 255, 0)
+
+        order = ["crownsShop", "upgradeNow", "friends", "social", "spellBook", "pass", "flee"]
+        items = []
+        if show_buttons and button_states:
+            for key in order:
+                if button_states.get(key, False):
+                    items.append(key)
+
+        (state_w, state_h), _ = cv2.getTextSize(label, font, state_scale, state_thickness)
+        max_width = state_w
+        for item in items:
+            (tw, _), _ = cv2.getTextSize(item, font, item_scale, item_thickness)
+            if tw > max_width:
+                max_width = tw
+
+        state_line_h = state_h + 6
+        if items:
+            (_, item_h), _ = cv2.getTextSize("X", font, item_scale, item_thickness)
+            item_line_h = item_h + 4
+        else:
+            item_line_h = 0
+
+        box_w = max_width + pad * 2
+        box_h = pad * 2 + state_line_h + (item_line_h * len(items))
+
+        x1 = max(2, w - box_w - margin)
+        y1 = int((h - box_h) * 0.5)
+        y1 = max(2, min(h - box_h - 2, y1))
+        x2 = min(w - 2, x1 + box_w)
+        y2 = min(h - 2, y1 + box_h)
+
+        overlay = vis.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, alpha, vis, 1 - alpha, 0, vis)
+
+        text_x = x1 + pad
+        cy = y1 + pad + state_h
+        cv2.putText(vis, label, (text_x, cy), font, state_scale, gold, state_thickness, cv2.LINE_AA)
+        cy += state_line_h
+        for item in items:
+            cv2.putText(vis, item, (text_x, cy), font, item_scale, green, item_thickness, cv2.LINE_AA)
+            cy += item_line_h
 
     def _participants_legend_bottom(h: int, w: int) -> int:
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -173,7 +221,12 @@ def main():
                 if SHOW_MASTER_DEBUG_OVERLAY:
                     master = analysis.copy()
                     state_label = _format_state_label(state_current)
-                    _draw_state_indicator(master, state_label)
+                    _draw_state_and_buttons(
+                        master,
+                        state_label,
+                        result.button_states,
+                        show_buttons=MASTER_OVERLAY_SHOW_BUTTON_LIST,
+                    )
                     if in_card_select:
                         if MASTER_OVERLAY_SHOW_PARTICIPANTS:
                             master = render_participants_overlay(
@@ -186,20 +239,6 @@ def main():
                             )
                         if MASTER_OVERLAY_SHOW_INITIATIVE:
                             master = render_initiative_boxes(master, INITIATIVE_CFG, game_state.battle.initiative)
-                    if MASTER_OVERLAY_SHOW_BUTTON_LIST and result.button_states:
-                        h, w = master.shape[:2]
-                        x = max(8, int(w * 0.03))
-                        if in_card_select and MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND:
-                            y = _participants_legend_bottom(h, w) + 16
-                        else:
-                            y = int(h * 0.2)
-                        order = ["crownsShop", "upgradeNow", "friends", "social", "spellBook", "pass", "flee"]
-                        items = []
-                        for key in order:
-                            hit = result.button_states.get(key, False)
-                            color = (0, 255, 0) if hit else (0, 0, 255)
-                            items.append((key, color))
-                        draw_status_list(master, items, x=x, y=y, copy=False)
                     _safe_imshow("wizmatic:master", master)
                 else:
                     if SHOW_INITIATIVE_OVERLAY and result.initiative_overlay is not None:
@@ -220,6 +259,8 @@ def main():
                             allies = game_state.battle.participants.allies
                             for p in enemies + allies:
                                 if p is None:
+                                    continue
+                                if not p.name_ocr:
                                     continue
                                 raw = p.name_raw if p.name_raw else "unknown"
                                 final = p.name if p.name else "unknown"

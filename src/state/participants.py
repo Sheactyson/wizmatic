@@ -1680,8 +1680,11 @@ def _ocr_health_split(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int
     left_crop = img_bgr[:, :left_end]
     right_crop = img_bgr[:, right_start:]
     digits_only = "0123456789"
-    left_text = _ocr_text(left_crop, cfg, digits_only, prefer_red=False, clahe=True, backend_override="tesseract")
-    right_text = _ocr_text(right_crop, cfg, digits_only, prefer_red=False, clahe=True, backend_override="tesseract")
+    left_text = _ocr_text(left_crop, cfg, digits_only, prefer_red=True, clahe=True)
+    right_text = _ocr_text(right_crop, cfg, digits_only, prefer_red=True, clahe=True)
+    if not left_text and not right_text:
+        left_text = _ocr_text(left_crop, cfg, digits_only, prefer_red=True, clahe=True, invert_override=True)
+        right_text = _ocr_text(right_crop, cfg, digits_only, prefer_red=True, clahe=True, invert_override=True)
     return (_first_number(left_text), _first_number(right_text))
 
 
@@ -1722,8 +1725,23 @@ def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int],
     best_cur = None
     best_max = None
 
-    for invert in (False, True):
-        prepped = _prep_tesseract_health(img_bgr, cfg, invert=invert)
+    attempts = [
+        (False, True, False),
+        (True, True, False),
+        (False, True, True),
+        (True, True, True),
+        (False, False, False),
+        (True, False, False),
+    ]
+    for invert, clahe, binarize in attempts:
+        prepped = _prep_easyocr_image(
+            img_bgr,
+            cfg,
+            invert=invert,
+            prefer_red=True,
+            clahe=clahe,
+            binarize=binarize,
+        )
         text = _read_combined(prepped)
         cur, maxv = _parse_text(text)
         if cur is not None:
@@ -1733,19 +1751,8 @@ def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int],
         if cur is not None and maxv is not None:
             return (cur, maxv)
 
-    if best_cur is not None and best_max is not None:
+    if best_cur is not None or best_max is not None:
         return (best_cur, best_max)
-
-    for invert in (False, True):
-        prepped = _prep_plain_health(img_bgr, cfg, invert=invert)
-        text = _read_combined(prepped)
-        cur, maxv = _parse_text(text)
-        if cur is not None and best_cur is None:
-            best_cur = cur
-        if maxv is not None and best_max is None:
-            best_max = maxv
-        if best_cur is not None and best_max is not None:
-            return (best_cur, best_max)
     return (None, None)
 
 
@@ -1761,7 +1768,23 @@ def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Opt
             return
         candidates.append((_health_score(cur, maxv), cur, maxv))
 
-    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True, backend_override="tesseract"))
+    if cfg.backend == "easyocr":
+        easy_cur, easy_max = _easyocr_health(img_bgr, cfg)
+        easy_cur, easy_max = _normalize_health_pair(easy_cur, easy_max)
+        if easy_cur is not None or easy_max is not None:
+            candidates.append((_health_score(easy_cur, easy_max), easy_cur, easy_max))
+
+    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True, clahe=True))
+    _try(
+        _ocr_text(
+            img_bgr,
+            cfg,
+            cfg.health_whitelist,
+            prefer_red=True,
+            clahe=True,
+            invert_override=True,
+        )
+    )
     _try(
         _ocr_text(
             img_bgr,
@@ -1769,20 +1792,9 @@ def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Opt
             cfg.health_whitelist,
             prefer_red=True,
             invert_override=True,
-            backend_override="tesseract",
         )
     )
-    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=False, backend_override="tesseract"))
-    _try(
-        _ocr_text(
-            img_bgr,
-            cfg,
-            cfg.health_whitelist,
-            prefer_red=False,
-            invert_override=True,
-            backend_override="tesseract",
-        )
-    )
+    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True))
 
     best = max(candidates, key=lambda item: item[0], default=None)
     if best is not None and best[2] is not None:
@@ -2100,8 +2112,10 @@ def _extract_participant(
     name_time_parts_override: Optional[Tuple[float, float, float, float]] = None,
     name_hash_override: Optional[int] = None,
     name_prev_hash: Optional[int] = None,
+    name_ocr_override: Optional[bool] = None,
     skip_health_ocr: bool = False,
     health_override: Optional[Tuple[Optional[int], Optional[int]]] = None,
+    health_max_override: Optional[int] = None,
     skip_school_detect: bool = False,
     school_override: Optional[str] = None,
     school_score_override: Optional[float] = None,
@@ -2155,6 +2169,7 @@ def _extract_participant(
             name_time_ms=None,
             name_time_parts=None,
             name_roi_hash=None,
+            name_ocr=False,
             details_checked_at=None,
             health_current=None,
             health_max=None,
@@ -2226,6 +2241,7 @@ def _extract_participant(
         else:
             name_time_ms = name_time_override
             name_time_parts = name_time_parts_override
+        name_ocr = False if name_ocr_override is None else name_ocr_override
     else:
         name_text = _ocr_name_per_char(name_crop, cfg.ocr)
         if not name_text:
@@ -2325,6 +2341,7 @@ def _extract_participant(
         name_text = _apply_wordlist_correction(name_text, cfg.ocr)
         name_time_ms = (time.perf_counter() - name_timer_start) * 1000.0
         name_time_parts = None
+        name_ocr = True if name_ocr_override is None else name_ocr_override
 
     if (not skip_name_ocr) and (not name_text) and debug_dump and (not debug_dump_empty_names) and debug_dump_id:
         _remove_ocr_dumps_with_prefix(tag, dump_id=slot_dump_id)
@@ -2336,6 +2353,8 @@ def _extract_participant(
             health_current, health_max = health_override
     else:
         health_current, health_max = _ocr_health(health_crop, cfg.ocr)
+    if health_max_override is not None:
+        health_max = health_max_override
     if skip_pip_detect:
         pips = pips_override if pips_override is not None else PipInventory()
     else:
@@ -2352,6 +2371,7 @@ def _extract_participant(
         name_time_ms=name_time_ms,
         name_time_parts=name_time_parts,
         name_roi_hash=name_hash,
+        name_ocr=name_ocr,
         details_checked_at=details_checked_at_override,
         health_current=health_current,
         health_max=health_max,
@@ -2377,6 +2397,13 @@ def extract_participants(
     skip_health_ocr: bool = False,
     occupancy_refresh_s: float = 5.0,
     details_refresh_s: float = 3.0,
+    lock_name: bool = False,
+    lock_school: bool = False,
+    lock_health_max: bool = False,
+    force_health_refresh: bool = False,
+    force_pips_refresh: bool = False,
+    refresh_health_on_force_only: bool = False,
+    refresh_pips_on_force_only: bool = False,
     timestamp: Optional[float] = None,
     debug_dump: bool = False,
     debug_dump_health: bool = False,
@@ -2441,17 +2468,48 @@ def extract_participants(
             return True
         return any(tok == "unknown" for tok in tokens)
 
+    def _name_locked(prev: ParticipantState) -> bool:
+        if not lock_name:
+            return False
+        if not prev.name:
+            return False
+        return prev.name != "unknown"
+
+    def _school_locked(prev: ParticipantState) -> bool:
+        if not lock_school:
+            return False
+        if not prev.school:
+            return False
+        if prev.school_score is None:
+            return True
+        return prev.school_score >= cfg.school.template_threshold
+
     def _detail_needs(prev: Optional[ParticipantState], occupied_now: bool) -> Tuple[bool, bool, bool, bool, Optional[float]]:
         if not occupied_now:
             return (False, False, False, False, None)
         if prev is None or not prev.occupied:
             return (not skip_name_ocr, not skip_health_ocr, True, True, ts)
-        if not _refresh_due(prev):
-            return (False, False, False, False, prev.details_checked_at)
-        need_name = _name_incomplete(prev) and (not skip_name_ocr)
-        need_health = _health_incomplete(prev) and (not skip_health_ocr)
-        need_school = _school_incomplete(prev)
-        need_pips = _pips_incomplete(prev)
+        need_name = False
+        need_health = False
+        need_school = False
+        need_pips = False
+
+        if force_health_refresh and (not skip_health_ocr):
+            need_health = True
+        if force_pips_refresh:
+            need_pips = True
+
+        refresh_due = _refresh_due(prev)
+        if refresh_due:
+            if (not skip_name_ocr) and (not _name_locked(prev)) and _name_incomplete(prev):
+                need_name = True
+            if (not skip_health_ocr) and (not refresh_health_on_force_only) and _health_incomplete(prev):
+                need_health = True
+            if (not _school_locked(prev)) and _school_incomplete(prev):
+                need_school = True
+            if (not refresh_pips_on_force_only) and _pips_incomplete(prev):
+                need_pips = True
+
         if not (need_name or need_health or need_school or need_pips):
             return (False, False, False, False, prev.details_checked_at)
         return (need_name, need_health, need_school, need_pips, ts)
@@ -2554,6 +2612,7 @@ def extract_participants(
         enemy_name_final = None
         enemy_name_time = None
         enemy_name_parts = None
+        enemy_name_ocr = None
         enemy_name_hash = name_hash_overrides.get(("enemy", i)) if use_batch_easyocr else None
         enemy_sigil, enemy_sigil_score, _ = sigil_info.get(("enemy", i), (None, None, enemy_roi))
         enemy_needs = detail_needs.get(("enemy", i))
@@ -2561,6 +2620,9 @@ def extract_participants(
             enemy_name_raw, enemy_name_final, enemy_name_time, enemy_name_parts = name_overrides.get(
                 ("enemy", i), (None, None, None, None)
             )
+            if enemy_name_parts is not None:
+                _, _, ocr_ms, res_ms = enemy_name_parts
+                enemy_name_ocr = (ocr_ms > 0.0) or (res_ms > 0.0)
             if (enemy_name_final is None) and prev_enemy is not None:
                 enemy_name_final = prev_enemy.name or prev_enemy.name_raw
                 enemy_name_raw = prev_enemy.name_raw or prev_enemy.name
@@ -2569,6 +2631,7 @@ def extract_participants(
         ally_name_final = None
         ally_name_time = None
         ally_name_parts = None
+        ally_name_ocr = None
         ally_name_hash = name_hash_overrides.get(("ally", i)) if use_batch_easyocr else None
         ally_sigil, ally_sigil_score, _ = sigil_info.get(("ally", i), (None, None, ally_roi))
         ally_needs = detail_needs.get(("ally", i))
@@ -2576,6 +2639,9 @@ def extract_participants(
             ally_name_raw, ally_name_final, ally_name_time, ally_name_parts = name_overrides.get(
                 ("ally", i), (None, None, None, None)
             )
+            if ally_name_parts is not None:
+                _, _, ocr_ms, res_ms = ally_name_parts
+                ally_name_ocr = (ocr_ms > 0.0) or (res_ms > 0.0)
             if (ally_name_final is None) and prev_ally is not None:
                 ally_name_final = prev_ally.name or prev_ally.name_raw
                 ally_name_raw = prev_ally.name_raw or prev_ally.name
@@ -2589,6 +2655,13 @@ def extract_participants(
 
         enemy_need_name, enemy_need_health, enemy_need_school, enemy_need_pips, enemy_details_at = enemy_needs
         ally_need_name, ally_need_health, ally_need_school, ally_need_pips, ally_details_at = ally_needs
+
+        enemy_health_max_override = None
+        if lock_health_max and prev_enemy is not None and prev_enemy.health_max is not None:
+            enemy_health_max_override = prev_enemy.health_max
+        ally_health_max_override = None
+        if lock_health_max and prev_ally is not None and prev_ally.health_max is not None:
+            ally_health_max_override = prev_ally.health_max
 
         enemies.append(
             _extract_participant(
@@ -2608,10 +2681,12 @@ def extract_participants(
                 name_time_parts_override=(enemy_name_parts if use_batch_easyocr else None),
                 name_hash_override=enemy_name_hash,
                 name_prev_hash=(prev_enemy.name_roi_hash if prev_enemy is not None else None),
+                name_ocr_override=enemy_name_ocr,
                 skip_health_ocr=skip_health_ocr or (not enemy_need_health),
                 health_override=(
                     (prev_enemy.health_current, prev_enemy.health_max) if prev_enemy is not None else None
                 ),
+                health_max_override=enemy_health_max_override,
                 skip_school_detect=(not enemy_need_school),
                 school_override=(prev_enemy.school if prev_enemy is not None else None),
                 school_score_override=(prev_enemy.school_score if prev_enemy is not None else None),
@@ -2649,8 +2724,10 @@ def extract_participants(
                 name_time_parts_override=(ally_name_parts if use_batch_easyocr else None),
                 name_hash_override=ally_name_hash,
                 name_prev_hash=(prev_ally.name_roi_hash if prev_ally is not None else None),
+                name_ocr_override=ally_name_ocr,
                 skip_health_ocr=skip_health_ocr or (not ally_need_health),
                 health_override=((prev_ally.health_current, prev_ally.health_max) if prev_ally is not None else None),
+                health_max_override=ally_health_max_override,
                 skip_school_detect=(not ally_need_school),
                 school_override=(prev_ally.school if prev_ally is not None else None),
                 school_score_override=(prev_ally.school_score if prev_ally is not None else None),

@@ -67,6 +67,7 @@ class ParticipantState:
     name_time_ms: Optional[float] = None
     name_time_parts: Optional[Tuple[float, float, float, float]] = None
     name_roi_hash: Optional[int] = None
+    name_ocr: bool = False
     details_checked_at: Optional[float] = None
     health_current: Optional[int] = None
     health_max: Optional[int] = None
@@ -97,6 +98,7 @@ class BattleState:
     active: bool = False
     in_card_select: bool = False
     card_select_started_at: Optional[float] = None
+    initial_card_select_done: bool = False
     initiative: InitiativeState = field(default_factory=InitiativeState)
     turn_order: TurnOrderState = field(default_factory=TurnOrderState)
     participants: ParticipantsState = field(default_factory=ParticipantsState)

@@ -219,6 +219,7 @@ def analyze_game_state(
     in_card_select = resolved_state == STATE_CARD_SELECT
     game_state.battle.active = in_battle
     game_state.battle.in_card_select = in_card_select
+    entered_card_select = in_card_select and (not was_in_card_select)
 
     initiative_overlay = None
     participants_overlay = None
@@ -301,14 +302,38 @@ def analyze_game_state(
         _draw_button_roi("spellBook", button_profile.spell_book_rel_roi, label_pos="top", hit=button_states.get("spellBook", False))
         if button_overlay is not None:
             h, w = button_overlay.shape[:2]
-            x = max(8, int(w * 0.03))
-            y = int(h * 0.2)
             items = []
             for key in BUTTON_ORDER:
                 hit = button_states.get(key, False)
-                color = (0, 255, 0) if hit else (0, 0, 255)
-                items.append((key, color))
-            draw_status_list(button_overlay, items, x=x, y=y, copy=False)
+                if hit:
+                    items.append((key, (0, 255, 0)))
+            if items:
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.45
+                thickness = 1
+                pad = 6
+                line_h = 16
+                max_width = 0
+                for label, _ in items:
+                    (tw, _), _ = cv2.getTextSize(label, font, font_scale, thickness)
+                    if tw > max_width:
+                        max_width = tw
+                box_w = max_width + pad * 2
+                box_h = line_h * len(items) + pad
+                x = max(8, w - box_w - 8)
+                y = int((h - box_h) * 0.5) + line_h - 2
+                y = max(line_h, min(h - 2, y))
+                draw_status_list(
+                    button_overlay,
+                    items,
+                    x=x,
+                    y=y,
+                    line_h=line_h,
+                    font_scale=font_scale,
+                    thickness=thickness,
+                    pad=pad,
+                    copy=False,
+                )
 
     if in_card_select:
         if (not was_in_card_select) and (debug_dump_ocr or debug_dump_health_roi):
@@ -318,33 +343,34 @@ def analyze_game_state(
 
         card_select_started_at = game_state.battle.card_select_started_at or game_state.updated_at
 
-        should_check_initiative = True
-        if game_state.battle.initiative.side:
-            stable_since = game_state.battle.initiative.stable_since
-            stable_ok = stable_since is not None and (game_state.updated_at - stable_since) >= INITIATIVE_STABLE_HOLD_S
-            within_window = (game_state.updated_at - card_select_started_at) <= INITIATIVE_CAPTURE_WINDOW_S
-            should_check_initiative = (not stable_ok) or within_window
+        if not game_state.battle.initial_card_select_done:
+            should_check_initiative = True
+            if game_state.battle.initiative.side:
+                stable_since = game_state.battle.initiative.stable_since
+                stable_ok = stable_since is not None and (game_state.updated_at - stable_since) >= INITIATIVE_STABLE_HOLD_S
+                within_window = (game_state.updated_at - card_select_started_at) <= INITIATIVE_CAPTURE_WINDOW_S
+                should_check_initiative = (not stable_ok) or within_window
 
-        if should_check_initiative:
-            init = extract_initiative(
-                analysis,
-                initiative_cfg,
-                timestamp=game_state.updated_at,
-                debug_dump_rois=debug_dump_initiative_roi,
-            )
-            if init.side:
-                if init.side == game_state.battle.initiative.stable_side:
-                    init.stable_side = game_state.battle.initiative.stable_side or init.side
-                    init.stable_since = game_state.battle.initiative.stable_since
+            if should_check_initiative:
+                init = extract_initiative(
+                    analysis,
+                    initiative_cfg,
+                    timestamp=game_state.updated_at,
+                    debug_dump_rois=debug_dump_initiative_roi,
+                )
+                if init.side:
+                    if init.side == game_state.battle.initiative.stable_side:
+                        init.stable_side = game_state.battle.initiative.stable_side or init.side
+                        init.stable_since = game_state.battle.initiative.stable_since
+                    else:
+                        init.stable_side = init.side
+                        init.stable_since = game_state.updated_at
                 else:
-                    init.stable_side = init.side
-                    init.stable_since = game_state.updated_at
-            else:
-                init.stable_side = None
-                init.stable_since = None
-            init.last_checked_at = game_state.updated_at
-            game_state.battle.initiative = init
-            _update_turn_order_from_initiative(game_state)
+                    init.stable_side = None
+                    init.stable_since = None
+                init.last_checked_at = game_state.updated_at
+                game_state.battle.initiative = init
+                _update_turn_order_from_initiative(game_state)
 
         if render_initiative:
             initiative_overlay = render_initiative_overlay(
@@ -363,6 +389,13 @@ def analyze_game_state(
                 skip_health_ocr=False,
                 occupancy_refresh_s=PARTICIPANT_OCCUPANCY_REFRESH_S,
                 details_refresh_s=PARTICIPANT_DETAILS_REFRESH_S,
+                lock_name=True,
+                lock_school=True,
+                lock_health_max=True,
+                force_health_refresh=entered_card_select,
+                force_pips_refresh=entered_card_select,
+                refresh_health_on_force_only=True,
+                refresh_pips_on_force_only=True,
                 timestamp=game_state.updated_at,
                 debug_dump=debug_dump_ocr,
                 debug_dump_health=debug_dump_health_roi,
@@ -381,6 +414,8 @@ def analyze_game_state(
                 )
     else:
         game_state.battle.card_select_started_at = None
+        if was_in_card_select and (not game_state.battle.initial_card_select_done):
+            game_state.battle.initial_card_select_done = True
         if not in_battle:
             game_state.battle = BattleState()
 
