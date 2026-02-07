@@ -122,6 +122,81 @@ PLAYER_HUD_PROFILES: Dict[str, PlayerHUDProfile] = {
 }
 
 
+# Pip-slot slicing debug tuning.
+# Debug dump upscale factor applied before pip-slot guideline/crop slicing.
+PIP_SLOT_DEBUG_UPSCALE: int = 4
+
+# `PIP_SLOT_WIDTH_PX_BY_ASPECT` is the width of one pip slot in pixels,
+# keyed by aspect ratio. Values are interpreted in the upscaled debug ROI space.
+# `PIP_SLOT_GAP_PX_BY_ASPECT` is the inter-slot spacing (bloom exclusion)
+# in pixels, keyed by aspect ratio. Values are interpreted in the upscaled debug ROI space.
+# `PIP_SLOT_START_PX_BY_ASPECT` is the left-edge start for slot 1, per combat slot sigil,
+# in pixels in the upscaled debug ROI space.
+# `PIP_SLOT_TOP_CUT_PX_BY_ASPECT` and `PIP_SLOT_BOTTOM_CUT_PX_BY_ASPECT`
+# trim each slot crop vertically in the upscaled debug ROI space.
+# `PIP_SLOT_PRESENCE_CONFIDENCE_THRESHOLD` is the minimum best-template match
+# score required before a slot is treated as containing a pip.
+PIP_SLOT_WIDTH_PX_DEFAULT: int = 15
+PIP_SLOT_WIDTH_PX_BY_ASPECT: Dict[str, int] = {
+    "4:3": 40,
+    "16:9": 37, # SLOT WIDTH
+    "43:18": 31,
+}
+PIP_SLOT_GAP_PX_DEFAULT: int = 0
+PIP_SLOT_GAP_PX_BY_ASPECT: Dict[str, int] = {
+    "4:3": 33,
+    "16:9": 38, # SLOT GAP
+    "43:18": 25,
+}
+PIP_SLOT_START_PX_DEFAULT: int = 0
+PIP_SLOT_TOP_CUT_PX_DEFAULT: int = 0
+PIP_SLOT_TOP_CUT_PX_BY_ASPECT: Dict[str, int] = {
+    "4:3": 13,
+    "16:9": 12, # TOP CUT
+    "43:18": 10,
+}
+PIP_SLOT_BOTTOM_CUT_PX_DEFAULT: int = 0
+PIP_SLOT_BOTTOM_CUT_PX_BY_ASPECT: Dict[str, int] = {
+    "4:3": 22,
+    "16:9": 18, # BOTTOM CUT
+    "43:18": 18,
+}
+PIP_SLOT_PRESENCE_CONFIDENCE_THRESHOLD: float = 0.70
+PIP_SLOT_COUNT: int = 7
+PIP_SLOT_START_PX_BY_ASPECT: Dict[str, Dict[str, int]] = {
+    "4:3": {
+        "dagger": 45,
+        "key": 45,
+        "ruby": 45,
+        "spiral": 45,
+        "sun": 45,
+        "eye": 45,
+        "star": 45,
+        "moon": 45,
+    },
+    "16:9": {
+        "dagger": 45,
+        "key": 45,
+        "ruby": 45,
+        "spiral": 45, # START LOCATION
+        "sun": 45,
+        "eye": 45,
+        "star": 45,
+        "moon": 45,
+    },
+    "43:18": {
+        "dagger": 37,
+        "key": 37,
+        "ruby": 37,
+        "spiral": 37,
+        "sun": 37,
+        "eye": 37,
+        "star": 37,
+        "moon": 37,
+    },
+}
+
+
 @dataclass(frozen=True)
 class InitiativeRingThresholds:
     templates_base_dir: str = "src/assets/initiative"

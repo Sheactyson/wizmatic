@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from datetime import datetime
 from pathlib import Path
 import time
@@ -23,6 +23,8 @@ _OCR_DUMP_DIR = Path("debug/ocr")
 _OCR_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 _PARTICIPANT_DUMP_DIR = Path("debug/participants")
 _PARTICIPANT_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+_PIP_DUMP_DIR = Path("debug/pips")
+_PIP_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 _OCR_DUMP_COUNTS: Dict[str, int] = {}
 _WORDLIST_CACHE: Dict[str, List[str]] = {}
 _WORDLIST_NORM_CACHE: Dict[str, List[str]] = {}
@@ -93,6 +95,19 @@ class PipDetectConfig:
     max_area_frac: float = 0.05
     templates_base_dir: str = "src/assets/pips"
     template_threshold: float = 0.7
+    slot_debug_upscale: int = 3
+    slot_width_px: int = 15
+    slot_width_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_gap_px: int = 0
+    slot_gap_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_start_px: int = 0
+    slot_start_px_by_aspect: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    slot_top_cut_px: int = 0
+    slot_top_cut_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_bottom_cut_px: int = 0
+    slot_bottom_cut_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_presence_confidence_threshold: float = 0.7
+    slot_count: int = 7
 
 
 @dataclass(frozen=True)
@@ -600,6 +615,170 @@ def _dump_participant_roi(
     try:
         path = _PARTICIPANT_DUMP_DIR / f"{kind}_{side}_{index}.png"
         cv2.imwrite(str(path), crop)
+    except Exception:
+        pass
+
+
+def _pip_slot_name(side: str, index: int) -> str:
+    enemy_sigils = ("dagger", "key", "ruby", "spiral")
+    ally_sigils = ("sun", "eye", "star", "moon")
+    names = enemy_sigils if side == "enemy" else ally_sigils
+    if 0 <= index < len(names):
+        return names[index]
+    return f"{side}_{index}"
+
+
+def _pip_slot_start_px(cfg: PipDetectConfig, aspect_key: str, slot_name: str) -> int:
+    by_aspect = cfg.slot_start_px_by_aspect or {}
+    aspect_map = by_aspect.get(aspect_key) or by_aspect.get("16:9") or {}
+    try:
+        start = aspect_map.get(slot_name)
+        if start is None:
+            start = cfg.slot_start_px
+        return max(0, int(round(float(start))))
+    except Exception:
+        return max(0, int(round(float(cfg.slot_start_px))))
+
+
+def _pip_aspect_dir_name(aspect_key: str) -> str:
+    # Windows-safe aspect directory names.
+    known = {
+        "4:3": "4x3",
+        "16:9": "16x9",
+        "43:18": "43x18",
+    }
+    if aspect_key in known:
+        return known[aspect_key]
+    safe = []
+    for ch in str(aspect_key):
+        if ch.isalnum() or ch in ("-", "_"):
+            safe.append(ch)
+        else:
+            safe.append("_")
+    out = "".join(safe).strip("_")
+    return out or "unknown"
+
+
+def _pip_slot_width_px(cfg: PipDetectConfig, aspect_key: str) -> int:
+    by_aspect = cfg.slot_width_px_by_aspect or {}
+    try:
+        width = by_aspect.get(aspect_key)
+        if width is None:
+            width = by_aspect.get("16:9")
+        if width is None:
+            width = cfg.slot_width_px
+        return max(1, int(round(float(width))))
+    except Exception:
+        return max(1, int(round(float(cfg.slot_width_px))))
+
+
+def _pip_slot_gap_px(cfg: PipDetectConfig, aspect_key: str) -> int:
+    by_aspect = cfg.slot_gap_px_by_aspect or {}
+    try:
+        gap = by_aspect.get(aspect_key)
+        if gap is None:
+            gap = by_aspect.get("16:9")
+        if gap is None:
+            gap = cfg.slot_gap_px
+        return max(0, int(round(float(gap))))
+    except Exception:
+        return max(0, int(round(float(cfg.slot_gap_px))))
+
+
+def _pip_slot_top_cut_px(cfg: PipDetectConfig, aspect_key: str) -> int:
+    by_aspect = cfg.slot_top_cut_px_by_aspect or {}
+    try:
+        top = by_aspect.get(aspect_key)
+        if top is None:
+            top = by_aspect.get("16:9")
+        if top is None:
+            top = cfg.slot_top_cut_px
+        return max(0, int(round(float(top))))
+    except Exception:
+        return max(0, int(round(float(cfg.slot_top_cut_px))))
+
+
+def _pip_slot_bottom_cut_px(cfg: PipDetectConfig, aspect_key: str) -> int:
+    by_aspect = cfg.slot_bottom_cut_px_by_aspect or {}
+    try:
+        bot = by_aspect.get(aspect_key)
+        if bot is None:
+            bot = by_aspect.get("16:9")
+        if bot is None:
+            bot = cfg.slot_bottom_cut_px
+        return max(0, int(round(float(bot))))
+    except Exception:
+        return max(0, int(round(float(cfg.slot_bottom_cut_px))))
+
+
+def _dump_pips_roi_debug(
+    pips_crop: np.ndarray,
+    *,
+    side: str,
+    index: int,
+    aspect_key: str,
+    cfg: PipDetectConfig,
+) -> None:
+    if pips_crop is None or pips_crop.size == 0:
+        return
+    try:
+        slot_name = _pip_slot_name(side, index)
+        slot_dir = _PIP_DUMP_DIR / slot_name
+        slot_dir.mkdir(parents=True, exist_ok=True)
+
+        upscale = max(1, int(cfg.slot_debug_upscale))
+        if upscale > 1:
+            pips_debug = cv2.resize(
+                pips_crop,
+                (pips_crop.shape[1] * upscale, pips_crop.shape[0] * upscale),
+                interpolation=cv2.INTER_CUBIC,
+            )
+        else:
+            pips_debug = pips_crop
+
+        raw_path = slot_dir / "pips_roi.png"
+        cv2.imwrite(str(raw_path), pips_debug)
+
+        h, w = pips_debug.shape[:2]
+        if h <= 0 or w <= 0:
+            return
+        slot_count = max(1, int(cfg.slot_count))
+        start_x = _pip_slot_start_px(cfg, aspect_key, slot_name)
+        slot_w = _pip_slot_width_px(cfg, aspect_key)
+        slot_gap = _pip_slot_gap_px(cfg, aspect_key)
+        slot_step = slot_w + slot_gap
+        top_cut = _pip_slot_top_cut_px(cfg, aspect_key)
+        bottom_cut = _pip_slot_bottom_cut_px(cfg, aspect_key)
+        y1 = max(0, min(h - 1, top_cut))
+        y2 = max(y1 + 1, min(h, h - bottom_cut))
+
+        # Guide image: only the kept slot crops are shown; excluded gap regions are black.
+        guide = np.zeros_like(pips_debug)
+        for n in range(slot_count):
+            x1 = start_x + (n * slot_step)
+            x2 = x1 + slot_w
+            cx1 = max(0, min(w, x1))
+            cx2 = max(0, min(w, x2))
+            if cx2 <= cx1:
+                continue
+            guide[y1:y2, cx1:cx2] = pips_debug[y1:y2, cx1:cx2]
+
+        guide_path = slot_dir / "pips_roi_guides.png"
+        cv2.imwrite(str(guide_path), guide)
+
+        # Dump each pip-slot crop (1..7) based on start + slot width.
+        for n in range(slot_count):
+            x1 = start_x + (n * slot_step)
+            x2 = x1 + slot_w
+            cx1 = max(0, min(w, x1))
+            cx2 = max(0, min(w, x2))
+            if cx2 > cx1:
+                slot_crop = pips_debug[y1:y2, cx1:cx2]
+            else:
+                # Keep deterministic output even if bounds are invalid.
+                slot_crop = np.zeros((max(1, y2 - y1), 1, 3), dtype=np.uint8)
+            slot_path = slot_dir / f"pip_slot_{n + 1}.png"
+            cv2.imwrite(str(slot_path), slot_crop)
     except Exception:
         pass
 
@@ -2270,7 +2449,7 @@ def _count_blobs(mask: np.ndarray, min_area: int, max_area: int) -> int:
     return count
 
 
-_PIP_TEMPLATE_CACHE: Dict[str, List[Tuple[str, np.ndarray]]] = {}
+_PIP_TEMPLATE_CACHE: Dict[str, Dict[str, List[np.ndarray]]] = {}
 _SIGIL_TEMPLATE_CACHE: Dict[str, List[Tuple[str, np.ndarray]]] = {}
 _SCHOOL_TEMPLATE_CACHE: Dict[str, List[Tuple[str, np.ndarray]]] = {}
 
@@ -2410,106 +2589,195 @@ def _detect_school(
     return _match_named_template(school_bgr, templates, cfg.template_threshold, pad=4)
 
 
-def _load_pip_templates(cfg: PipDetectConfig, aspect_key: str) -> List[Tuple[str, np.ndarray]]:
+def _load_pip_templates(cfg: PipDetectConfig, aspect_key: str) -> Dict[str, List[np.ndarray]]:
     base = Path(cfg.templates_base_dir)
-    cache_key = f"{base.resolve()}::{aspect_key}"
+    aspect_dir = _pip_aspect_dir_name(aspect_key)
+    cache_key = f"{base.resolve()}::{aspect_dir}"
     if cache_key in _PIP_TEMPLATE_CACHE:
         return _PIP_TEMPLATE_CACHE[cache_key]
 
     if not base.exists():
-        _PIP_TEMPLATE_CACHE[cache_key] = []
-        return []
+        _PIP_TEMPLATE_CACHE[cache_key] = {}
+        return {}
 
-    suffixes = _template_suffixes_for_aspect(aspect_key)
-    templates: List[Tuple[str, np.ndarray]] = []
+    templates: Dict[str, List[np.ndarray]] = {}
     for folder in sorted(p for p in base.iterdir() if p.is_dir()):
         token = folder.name.lower()
-        for png in sorted(folder.glob("*.png")):
-            stem = png.stem.strip().lower()
-            if not any(stem.endswith(suf) for suf in suffixes):
-                continue
+        paths: List[Path] = []
+        # Preferred layout: assets/pips/<token>/<aspect_dir>/*.png
+        aspect_subdir = folder / aspect_dir
+        if aspect_subdir.exists():
+            paths.extend(sorted(aspect_subdir.glob("*.png")))
+        # Fallback layout: assets/pips/<token>/*.png
+        if not paths:
+            paths.extend(sorted(folder.glob("*.png")))
+        for png in paths:
             img = cv2.imread(str(png), cv2.IMREAD_GRAYSCALE)
             if img is None:
                 continue
-            templates.append((token, img))
+            if token not in templates:
+                templates[token] = []
+            templates[token].append(img)
 
     _PIP_TEMPLATE_CACHE[cache_key] = templates
     return templates
 
 
-def _match_pip_template(
+def _best_pip_template_match(
     crop_gray: np.ndarray,
-    templates: List[Tuple[str, np.ndarray]],
-    threshold: float,
-) -> Optional[str]:
-    if crop_gray.size == 0 or not templates:
-        return None
-    best_name = None
+    templates_by_token: Dict[str, List[np.ndarray]],
+    *,
+    allowed_tokens: Optional[Set[str]] = None,
+) -> Tuple[Optional[str], float]:
+    if crop_gray.size == 0 or not templates_by_token:
+        return None, -1.0
+    best_name: Optional[str] = None
     best_score = -1.0
-    for name, templ in templates:
-        try:
-            resized = cv2.resize(crop_gray, (templ.shape[1], templ.shape[0]), interpolation=cv2.INTER_AREA)
-        except Exception:
+    for token, templates in templates_by_token.items():
+        if allowed_tokens is not None and token not in allowed_tokens:
             continue
-        res = cv2.matchTemplate(resized, templ, cv2.TM_CCOEFF_NORMED)
-        score = float(res[0][0])
-        if score > best_score:
-            best_score = score
-            best_name = name
-    if best_score >= threshold:
-        return best_name
-    return None
+        for templ in templates:
+            try:
+                resized = cv2.resize(crop_gray, (templ.shape[1], templ.shape[0]), interpolation=cv2.INTER_AREA)
+            except Exception:
+                continue
+            res = cv2.matchTemplate(resized, templ, cv2.TM_CCOEFF_NORMED)
+            score = float(res[0][0]) if res.size else -1.0
+            if score > best_score:
+                best_score = score
+                best_name = token
+    return best_name, best_score
 
 
-def _pip_counts(pips_bgr: np.ndarray, cfg: PipDetectConfig, aspect_key: str) -> PipInventory:
+def _pip_presence_metrics(slot_bgr: np.ndarray, cfg: PipDetectConfig) -> Tuple[float, int]:
+    if slot_bgr.size == 0:
+        return 0.0, 0
+    hsv = cv2.cvtColor(slot_bgr, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1]
+    v = hsv[:, :, 2]
+    white = (s <= cfg.white_sat_max) & (v >= cfg.white_val_min)
+    colored = (s >= cfg.school_sat_min) & (v >= cfg.school_val_min)
+    mask = (white | colored).astype(np.uint8) * 255
+    kernel = np.ones((2, 2), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    ink_ratio = float((mask > 0).mean()) if mask.size else 0.0
+    num, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    largest = 0
+    for i in range(1, num):
+        largest = max(largest, int(stats[i, cv2.CC_STAT_AREA]))
+    return ink_ratio, largest
+
+
+def _pip_slot_is_school(slot_bgr: np.ndarray, cfg: PipDetectConfig) -> bool:
+    if slot_bgr.size == 0:
+        return False
+    h, w = slot_bgr.shape[:2]
+    if h < 3 or w < 3:
+        return False
+    cx1 = max(0, int(w * 0.28))
+    cx2 = max(cx1 + 1, min(w, int(w * 0.72)))
+    cy1 = max(0, int(h * 0.28))
+    cy2 = max(cy1 + 1, min(h, int(h * 0.72)))
+    center = slot_bgr[cy1:cy2, cx1:cx2]
+    if center.size == 0:
+        return False
+    gray = cv2.cvtColor(center, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 60, 140)
+    edge_ratio = float((edges > 0).mean()) if edges.size else 0.0
+    hsv = cv2.cvtColor(center, cv2.COLOR_BGR2HSV)
+    sat_mean = float(hsv[:, :, 1].mean()) if hsv.size else 0.0
+    return edge_ratio >= 0.06 and sat_mean >= max(35.0, cfg.school_sat_min * 0.5)
+
+
+def _pip_non_school_fallback(slot_bgr: np.ndarray, cfg: PipDetectConfig) -> str:
+    if slot_bgr.size == 0:
+        return "unknown"
+    hsv = cv2.cvtColor(slot_bgr, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0].astype(np.float32)
+    s = hsv[:, :, 1].astype(np.float32)
+    v = hsv[:, :, 2].astype(np.float32)
+    active = v >= float(cfg.white_val_min * 0.55)
+    if not np.any(active):
+        return "unknown"
+    h_mean = float(h[active].mean())
+    s_mean = float(s[active].mean())
+    v_mean = float(v[active].mean())
+    # Regular pips are bright/low-sat. Power pips skew warm/gold with higher sat.
+    if s_mean <= float(cfg.white_sat_max + 25) and v_mean >= float(cfg.white_val_min * 0.75):
+        return "pip"
+    if 10.0 <= h_mean <= 45.0 and s_mean >= 70.0:
+        return "power"
+    return "pip" if s_mean < 90.0 else "power"
+
+
+def _pip_counts(
+    pips_bgr: np.ndarray,
+    cfg: PipDetectConfig,
+    aspect_key: str,
+    *,
+    slot_name: str = "sun",
+) -> PipInventory:
     counts = PipInventory()
     if pips_bgr.size == 0:
         return counts
 
-    hsv = cv2.cvtColor(pips_bgr, cv2.COLOR_BGR2HSV)
-    s = hsv[:, :, 1]
-    v = hsv[:, :, 2]
-
-    white = (s <= cfg.white_sat_max) & (v >= cfg.white_val_min)
-    colored = (s >= cfg.school_sat_min) & (v >= cfg.school_val_min)
-    candidate = white | colored
-
-    kernel = np.ones((3, 3), np.uint8)
-    candidate_mask = cv2.morphologyEx(candidate.astype(np.uint8) * 255, cv2.MORPH_OPEN, kernel)
-
-    area = pips_bgr.shape[0] * pips_bgr.shape[1]
-    min_area = max(1, int(area * cfg.min_area_frac))
-    max_area = max(1, int(area * cfg.max_area_frac))
-
-    tokens: List[str] = []
-    templates = _load_pip_templates(cfg, aspect_key)
-    if templates:
-        num, _, stats, _ = cv2.connectedComponentsWithStats(candidate_mask, connectivity=8)
-        for i in range(1, num):
-            blob_area = stats[i, cv2.CC_STAT_AREA]
-            if blob_area < min_area or blob_area > max_area:
-                continue
-            x = stats[i, cv2.CC_STAT_LEFT]
-            y = stats[i, cv2.CC_STAT_TOP]
-            w = stats[i, cv2.CC_STAT_WIDTH]
-            h = stats[i, cv2.CC_STAT_HEIGHT]
-            pad = max(1, int(min(w, h) * 0.15))
-            x1 = max(0, x - pad)
-            y1 = max(0, y - pad)
-            x2 = min(pips_bgr.shape[1], x + w + pad)
-            y2 = min(pips_bgr.shape[0], y + h + pad)
-            crop = pips_bgr[y1:y2, x1:x2]
-            crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            match = _match_pip_template(crop_gray, templates, cfg.template_threshold)
-            if match == "regular":
-                tokens.append("pip")
-            elif match:
-                tokens.append(match)
-            else:
-                tokens.append("unknown")
+    upscale = max(1, int(cfg.slot_debug_upscale))
+    if upscale > 1:
+        pips_eval = cv2.resize(
+            pips_bgr,
+            (pips_bgr.shape[1] * upscale, pips_bgr.shape[0] * upscale),
+            interpolation=cv2.INTER_CUBIC,
+        )
     else:
-        num = _count_blobs(candidate_mask, min_area, max_area)
-        tokens.extend(["unknown"] * num)
+        pips_eval = pips_bgr
+
+    h, w = pips_eval.shape[:2]
+    if h == 0 or w == 0:
+        return counts
+
+    slot_count = max(1, int(cfg.slot_count))
+    start_x = _pip_slot_start_px(cfg, aspect_key, slot_name)
+    slot_w = _pip_slot_width_px(cfg, aspect_key)
+    slot_gap = _pip_slot_gap_px(cfg, aspect_key)
+    slot_step = slot_w + slot_gap
+    top_cut = _pip_slot_top_cut_px(cfg, aspect_key)
+    bottom_cut = _pip_slot_bottom_cut_px(cfg, aspect_key)
+    y1 = max(0, min(h - 1, top_cut))
+    y2 = max(y1 + 1, min(h, h - bottom_cut))
+
+    templates_by_token = _load_pip_templates(cfg, aspect_key)
+    tokens: List[str] = []
+    for i in range(slot_count):
+        x1 = start_x + (i * slot_step)
+        x2 = x1 + slot_w
+        cx1 = max(0, min(w, x1))
+        cx2 = max(0, min(w, x2))
+        if cx2 <= cx1:
+            continue
+        slot = pips_eval[y1:y2, cx1:cx2]
+        if slot.size == 0:
+            continue
+
+        ink_ratio, largest = _pip_presence_metrics(slot, cfg)
+        slot_area = max(1, slot.shape[0] * slot.shape[1])
+        if not (
+            ((ink_ratio >= 0.025) and (largest >= max(1, int(slot_area * 0.015))))
+            or (largest >= max(1, int(slot_area * 0.05)))
+        ):
+            continue
+
+        slot_gray = cv2.cvtColor(slot, cv2.COLOR_BGR2GRAY)
+        best_match, best_score = _best_pip_template_match(slot_gray, templates_by_token)
+        if best_score < float(cfg.slot_presence_confidence_threshold):
+            # Treat as empty when template confidence is below configured threshold.
+            continue
+        if best_match == "regular":
+            token = "pip"
+        elif best_match:
+            token = best_match
+        else:
+            token = "unknown"
+        tokens.append(token)
 
     counts.tokens = tokens
     counts.normal = tokens.count("pip")
@@ -2591,6 +2859,7 @@ def _extract_participant(
     debug_dump_empty_names: bool = False,
     debug_dump_sigil_roi: bool = False,
     debug_dump_school_roi: bool = False,
+    debug_dump_pips: bool = False,
     debug_print_health_ocr: bool = True,
     debug_print_health_ocr_initial_read: bool = False,
     debug_dump_id: Optional[str] = None,
@@ -2658,8 +2927,16 @@ def _extract_participant(
     school_crop = None
     if not skip_health_ocr:
         health_crop = crop_relative(frame_bgr, health_roi)
-    if not skip_pip_detect:
+    if (not skip_pip_detect) or debug_dump_pips:
         pips_crop = crop_relative(frame_bgr, pips_roi)
+    if debug_dump_pips and pips_crop is not None:
+        _dump_pips_roi_debug(
+            pips_crop,
+            side=side,
+            index=index,
+            aspect_key=aspect_key,
+            cfg=cfg.pip,
+        )
     if (not skip_school_detect) or debug_dump_school_roi:
         school_crop = crop_relative(frame_bgr, school_roi)
     if school_crop is not None:
@@ -2855,7 +3132,12 @@ def _extract_participant(
     if skip_pip_detect:
         pips = pips_override if pips_override is not None else PipInventory()
     else:
-        pips = _pip_counts(pips_crop, cfg.pip, aspect_key)
+        pips = _pip_counts(
+            pips_crop,
+            cfg.pip,
+            aspect_key,
+            slot_name=_pip_slot_name(side, index),
+        )
 
     return ParticipantState(
         side=side,
@@ -2908,6 +3190,7 @@ def extract_participants(
     debug_dump_empty_names: bool = False,
     debug_dump_sigil_roi: bool = False,
     debug_dump_school_roi: bool = False,
+    debug_dump_pips: bool = False,
     debug_print_health_ocr: bool = True,
     debug_print_health_ocr_initial_read: bool = False,
     debug_dump_id: Optional[str] = None,
@@ -2988,6 +3271,7 @@ def extract_participants(
         if not occupied_now:
             return (False, False, False, False, None)
         if prev is None or not prev.occupied:
+            # New sigil-occupied slot: resolve pips immediately on detection.
             return (not skip_name_ocr, not skip_health_ocr, True, True, ts)
         need_name = False
         need_health = False
@@ -3202,6 +3486,7 @@ def extract_participants(
                 debug_dump_empty_names=debug_dump_empty_names,
                 debug_dump_sigil_roi=debug_dump_sigil_roi,
                 debug_dump_school_roi=debug_dump_school_roi,
+                debug_dump_pips=debug_dump_pips,
                 debug_print_health_ocr=debug_print_health_ocr,
                 debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
                 debug_dump_id=debug_dump_id,
@@ -3245,6 +3530,7 @@ def extract_participants(
                 debug_dump_empty_names=debug_dump_empty_names,
                 debug_dump_sigil_roi=debug_dump_sigil_roi,
                 debug_dump_school_roi=debug_dump_school_roi,
+                debug_dump_pips=debug_dump_pips,
                 debug_print_health_ocr=debug_print_health_ocr,
                 debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
                 debug_dump_id=debug_dump_id,
@@ -3372,15 +3658,11 @@ def render_player_wizard_overlay(
         return "?"
 
     def _player_pip_color(token: str) -> Tuple[int, int, int]:
-        if token in _SCHOOL_COLORS:
-            return _SCHOOL_COLORS[token]
-        if token in ("pip", "power"):
-            return (255, 255, 255)
-        return (200, 200, 200)
+        return _token_fill_color(token)
 
-    pip_items = [(_player_pip_label(tok), _player_pip_color(tok)) for tok in (pips.tokens or [])]
+    pip_items = [(_player_pip_label(tok), _player_pip_color(tok), tok) for tok in (pips.tokens or [])]
     if not pip_items:
-        pip_items = [("?", (200, 200, 200))]
+        pip_items = [("?", (200, 200, 200), "unknown")]
 
     timestamp = "Unknown"
     if player is not None and player.timestamp is not None:
@@ -3442,20 +3724,20 @@ def render_player_wizard_overlay(
     max_text_w_cap = max(220, int(w * 0.42))
     token_prefix_w = _text_w("Pip Tokens:") + 6
     token_items_fit = list(pip_items)
-    token_total_w = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _ in token_items_fit)
+    token_total_w = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _, _ in token_items_fit)
     while token_items_fit and token_total_w > max_text_w_cap:
         token_items_fit.pop()
-        token_total_w = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _ in token_items_fit)
+        token_total_w = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _, _ in token_items_fit)
     if not token_items_fit:
-        token_items_fit = [("?", (200, 200, 200))]
+        token_items_fit = [("?", (200, 200, 200), "unknown")]
     if len(token_items_fit) < len(pip_items):
-        token_items_fit.append(("...", (255, 255, 255)))
+        token_items_fit.append(("...", (255, 255, 255), "ellipsis"))
 
     fitted_rows: List[Tuple[str, str, Tuple[int, int, int]]] = []
     max_w_px = 0
     for kind, text, color in rows:
         if kind == "tokens":
-            width_px = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _ in token_items_fit)
+            width_px = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _, _ in token_items_fit)
             max_w_px = max(max_w_px, min(width_px, max_text_w_cap))
             fitted_rows.append((kind, text, color))
             continue
@@ -3481,8 +3763,9 @@ def render_player_wizard_overlay(
             cv2.putText(vis, text, (cursor, ty), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
             cv2.putText(vis, text, (cursor, ty), font, scale, color, thickness, cv2.LINE_AA)
             cursor += _text_w(text) + 6
-            for lbl, tok_color in token_items_fit:
-                cv2.putText(vis, lbl, (cursor, ty), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+            for lbl, tok_color, token_name in token_items_fit:
+                outline = _token_outline_color(token_name)
+                cv2.putText(vis, lbl, (cursor, ty), font, scale, outline, thickness + 2, cv2.LINE_AA)
                 cv2.putText(vis, lbl, (cursor, ty), font, scale, tok_color, thickness, cv2.LINE_AA)
                 cursor += _text_w(lbl) + 6
             ty += line_h
@@ -3650,9 +3933,10 @@ def _draw_pip_list_line(
     total = 0
     for token in tokens:
         token_label = _token_label(token)
-        token_color = _token_color(token)
+        token_color = _token_fill_color(token)
         (tw, _), _ = cv2.getTextSize(token_label, font, scale, thickness)
-        cv2.putText(vis, token_label, (cursor, y), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+        outline = _token_outline_color(token)
+        cv2.putText(vis, token_label, (cursor, y), font, scale, outline, thickness + 2, cv2.LINE_AA)
         cv2.putText(vis, token_label, (cursor, y), font, scale, token_color, thickness, cv2.LINE_AA)
         cursor += tw + 6
         total += _pip_token_value(token)
@@ -3672,19 +3956,33 @@ def _pip_token_value(token: str) -> int:
 
 
 _SCHOOL_COLORS: Dict[str, Tuple[int, int, int]] = {
-    "balance": (0, 170, 255),
-    "death": (80, 0, 80),
-    "fire": (0, 0, 255),
-    "ice": (255, 200, 80),
-    "life": (0, 200, 0),
-    "myth": (0, 215, 255),
-    "storm": (255, 0, 255),
+    # Fill colors for school pip labels.
+    "balance": (0, 0, 255),      # red
+    "death": (0, 0, 0),          # black
+    "fire": (0, 165, 255),       # orange
+    "ice": (255, 200, 120),      # light blue
+    "life": (0, 100, 0),         # dark green
+    "myth": (0, 255, 255),       # yellow
+    "storm": (180, 0, 180),      # purple
 }
 
 _TOKEN_COLORS: Dict[str, Tuple[int, int, int]] = {
     "pip": (255, 255, 255),
     "power": (0, 215, 255),
     "unknown": (180, 180, 180),
+}
+
+_TOKEN_OUTLINE_COLORS: Dict[str, Tuple[int, int, int]] = {
+    "fire": (0, 255, 255),       # yellow
+    "balance": (0, 215, 255),    # gold
+    "ice": (225, 105, 65),       # royal blue
+    "life": (144, 238, 144),     # light green
+    "storm": (0, 255, 255),      # yellow
+    "myth": (139, 0, 0),         # dark blue
+    "death": (255, 255, 255),    # white
+    "power": (0, 215, 255),      # gold
+    "pip": (255, 255, 255),      # white
+    "unknown": (0, 0, 0),
 }
 
 
@@ -3698,10 +3996,18 @@ def _token_label(token: str) -> str:
     return "?"
 
 
-def _token_color(token: str) -> Tuple[int, int, int]:
+def _token_fill_color(token: str) -> Tuple[int, int, int]:
     if token in _SCHOOL_COLORS:
         return _SCHOOL_COLORS[token]
     return _TOKEN_COLORS.get(token, (180, 180, 180))
+
+
+def _token_outline_color(token: str) -> Tuple[int, int, int]:
+    return _TOKEN_OUTLINE_COLORS.get(token, (0, 0, 0))
+
+
+def _token_color(token: str) -> Tuple[int, int, int]:
+    return _token_fill_color(token)
 
 
 def _draw_pip_tokens(vis: np.ndarray, participant: ParticipantState) -> None:
@@ -3727,8 +4033,10 @@ def _draw_pip_tokens(vis: np.ndarray, participant: ParticipantState) -> None:
     total = 0
     for token in participant.pips.tokens:
         label = _token_label(token)
-        color = _token_color(token)
+        color = _token_fill_color(token)
         (tw, th), _ = cv2.getTextSize(label, font, scale, thickness)
+        outline = _token_outline_color(token)
+        cv2.putText(vis, label, (x, y), font, scale, outline, thickness + 2, cv2.LINE_AA)
         cv2.putText(vis, label, (x, y), font, scale, color, thickness, cv2.LINE_AA)
         x += tw + 6
         total += _pip_token_value(token)
