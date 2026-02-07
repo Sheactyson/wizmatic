@@ -105,9 +105,9 @@ PARTICIPANT_LAYOUT = ParticipantLayout(
 PLAYER_HUD_PROFILES: Dict[str, PlayerHUDProfile] = {
     # Bottom-left HUD numeric overlays: health (red orb), mana (blue orb), energy (green orb).
     "4:3": PlayerHUDProfile(
-        health_roi=(0.032, 0.838, 0.115, 0.902),
-        mana_roi=(0.124, 0.838, 0.205, 0.902),
-        energy_roi=(0.215, 0.838, 0.296, 0.902),
+        health_roi=(0.0217, 0.82, 0.12, 0.872),
+        mana_roi=(0.11, 0.878, 0.18, 0.92),
+        energy_roi=(0.058, 0.908, 0.108, 0.94),
     ),
     "16:9": PlayerHUDProfile(
         health_roi=(0.018, 0.83, 0.09, 0.873),
@@ -115,9 +115,9 @@ PLAYER_HUD_PROFILES: Dict[str, PlayerHUDProfile] = {
         energy_roi=(0.042, 0.908, 0.078, 0.942),
     ),
     "43:18": PlayerHUDProfile(
-        health_roi=(0.022, 0.845, 0.077, 0.908),
-        mana_roi=(0.08, 0.845, 0.141, 0.908),
-        energy_roi=(0.150, 0.845, 0.205, 0.908),
+        health_roi=(0.014, 0.825, 0.067, 0.875),
+        mana_roi=(0.06, 0.88, 0.098, 0.923),
+        energy_roi=(0.03, 0.908, 0.058, 0.942),
     ),
 }
 

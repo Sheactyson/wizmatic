@@ -1,4 +1,6 @@
 import time
+import threading
+from copy import deepcopy
 from typing import Optional
 import cv2
 from utils.capture_wiz import Wizard101Capture
@@ -30,14 +32,15 @@ from config.wizmatic_config import (
     OCR_BACKEND,
     MASTER_OVERLAY_SHOW_PARTICIPANTS,
     MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND,
+    MASTER_OVERLAY_SHOW_PARTICIPANT_DETAILS,
     MASTER_OVERLAY_HIDE_EMPTY_SLOTS,
     MASTER_OVERLAY_SHOW_INITIATIVE,
     MASTER_OVERLAY_SHOW_PIPS,
     MASTER_OVERLAY_SHOW_BUTTON_LIST,
 )
 from config.participants_config import PARTICIPANTS_CFG
-from state.initiative import render_initiative_boxes
-from state.participants import render_participants_overlay, pop_health_ocr_logs
+from state.initiative import render_initiative_boxes, render_initiative_overlay
+from state.participants import render_participants_overlay, render_player_wizard_overlay, pop_health_ocr_logs
 
 def main():
     if OCR_BACKEND == "easyocr":
@@ -51,8 +54,18 @@ def main():
     frames.start()
 
     state_last = None
-    debug_ocr_session_id = 0
     game_state = GameState()
+    analysis_seq = 0
+    last_logged_seq = -1
+    latest_capture_frame = None
+    last_bundle_obj_id = None
+    pending_task = None
+    latest_packet = None
+    latest_button_states = None
+    task_lock = threading.Lock()
+    result_lock = threading.Lock()
+    task_event = threading.Event()
+    stop_event = threading.Event()
     gui_ok = True
     gui_warned = False
 
@@ -185,24 +198,37 @@ def main():
         bottom = top + box_h
         return bottom
 
-    try:
-        while True:
-            t0 = time.perf_counter()
+    def _analysis_worker() -> None:
+        nonlocal pending_task, latest_packet
+        worker_game_state = GameState()
+        worker_state_last = worker_game_state.state
+        worker_debug_ocr_session_id = 0
 
-            bundle = frames.get_latest()
-            if bundle is not None: # All actions regarding latest frames will go within this statement
-                #native = bundle.native # native image captured
-                analysis = bundle.normalized(1280, 720, allow_upscale=True) # normalized image captured
+        while not stop_event.is_set():
+            task_event.wait(timeout=0.05)
+            if stop_event.is_set():
+                break
 
-                render_initiative = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_INITIATIVE_OVERLAY
-                render_participants = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PARTICIPANTS_OVERLAY
-                render_player_wizard = SHOW_PLAYER_WIZARD_OVERLAY
-                render_buttons = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_BUTTON_OVERLAY
-                render_pips = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PIPDETECTION_OVERLAY
-                collect_buttons = MASTER_OVERLAY_SHOW_BUTTON_LIST
+            task = None
+            with task_lock:
+                if pending_task is not None:
+                    task = pending_task
+                    pending_task = None
+                task_event.clear()
+            if task is None:
+                continue
+
+            seq, analysis = task
+            render_initiative = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_INITIATIVE_OVERLAY
+            render_participants = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PARTICIPANTS_OVERLAY
+            render_player_wizard = SHOW_PLAYER_WIZARD_OVERLAY
+            render_buttons = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_BUTTON_OVERLAY
+            render_pips = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PIPDETECTION_OVERLAY
+            collect_buttons = MASTER_OVERLAY_SHOW_BUTTON_LIST
+            try:
                 result = analyze_game_state(
                     analysis,
-                    game_state,
+                    worker_game_state,
                     initiative_cfg=INITIATIVE_CFG,
                     participants_cfg=PARTICIPANTS_CFG,
                     render_initiative=render_initiative,
@@ -220,20 +246,100 @@ def main():
                     debug_dump_school_roi=DEBUG_DUMP_SCHOOL_ROI,
                     debug_dump_player_wizard_roi=DEBUG_DUMP_PLAYER_WIZARD_ROI,
                     debug_print_health_ocr=DEBUG_PRINT_HEALTH_OCR,
-                    debug_dump_ocr_id=str(debug_ocr_session_id),
+                    debug_dump_ocr_id=str(worker_debug_ocr_session_id),
                     debug_dump_ocr_limit=DEBUG_DUMP_OCR_MAX,
                 )
+            except Exception as exc:
+                print(f"[analysis] failed: {exc}")
+                continue
+
+            state_current = result.game_state.state
+            if worker_state_last != state_current and state_current == "card_select":
+                worker_debug_ocr_session_id += 1
+            worker_state_last = state_current
+
+            # Keep worker-owned state separate from published snapshots.
+            worker_game_state = deepcopy(result.game_state)
+
+            with result_lock:
+                latest_packet = (seq, analysis, result)
+
+    analysis_thread = threading.Thread(target=_analysis_worker, daemon=True)
+    analysis_thread.start()
+
+    try:
+        while True:
+            t0 = time.perf_counter()
+
+            bundle = frames.get_latest()
+            if bundle is not None and id(bundle) != last_bundle_obj_id:
+                last_bundle_obj_id = id(bundle)
+                latest_capture_frame = bundle.normalized(1280, 720, allow_upscale=True)
+                with task_lock:
+                    analysis_seq += 1
+                    pending_task = (analysis_seq, latest_capture_frame)
+                task_event.set()
+
+            packet = None
+            with result_lock:
+                packet = latest_packet
+
+            packet_analysis = None
+            state_current = game_state.state
+            in_card_select = game_state.battle.in_card_select
+            if packet is not None:
+                result_seq, analysis, result = packet
+                packet_analysis = analysis
                 game_state = result.game_state
+                if result.button_states is not None:
+                    latest_button_states = result.button_states
                 state_current = game_state.state
                 in_card_select = game_state.battle.in_card_select
 
+                if result_seq != last_logged_seq:
+                    last_logged_seq = result_seq
+                    if state_last != state_current:
+                        state_last = state_current
+                        if state_current == "card_select":
+                            if DEBUG_PRINT_STATE_CHANGES:
+                                print("Card Select Mode")
+                            if DEBUG_PRINT_NAME_OCR and game_state.battle.participants:
+                                enemies = game_state.battle.participants.enemies
+                                allies = game_state.battle.participants.allies
+                                for p in enemies + allies:
+                                    if p is None:
+                                        continue
+                                    if not p.name_ocr:
+                                        continue
+                                    raw = p.name_raw if p.name_raw else "unknown"
+                                    final = p.name if p.name else "unknown"
+                                    sigil_label = ((p.sigil or "unknown").strip() or "unknown").title()
+                                    if p.name_time_ms is not None:
+                                        if p.name_time_parts:
+                                            cap_ms, prep_ms, ocr_ms, res_ms = p.name_time_parts
+                                            print(
+                                                f"[ocr:name] {sigil_label}: {raw} -> {final} "
+                                                f"({p.name_time_ms:.1f}ms | capture {cap_ms:.1f}ms "
+                                                f"prep {prep_ms:.1f}ms ocr {ocr_ms:.1f}ms "
+                                                f"resolve {res_ms:.1f}ms)"
+                                            )
+                                        else:
+                                            print(f"[ocr:name] {sigil_label}: {raw} -> {final} ({p.name_time_ms:.1f}ms)")
+                                    else:
+                                        print(f"[ocr:name] {sigil_label}: {raw} -> {final}")
+                        else:
+                            if DEBUG_PRINT_STATE_CHANGES:
+                                print(f"{_format_state_label(state_current)} Mode")
+
+            render_base = latest_capture_frame if latest_capture_frame is not None else packet_analysis
+            if render_base is not None:
                 if SHOW_MASTER_DEBUG_OVERLAY:
-                    master = analysis.copy()
+                    master = render_base.copy()
                     state_label = _format_state_label(state_current)
                     _draw_state_and_buttons(
                         master,
                         state_label,
-                        result.button_states,
+                        latest_button_states,
                         show_buttons=MASTER_OVERLAY_SHOW_BUTTON_LIST,
                     )
                     if in_card_select:
@@ -241,78 +347,71 @@ def main():
                             master = render_participants_overlay(
                                 master,
                                 game_state.battle.participants,
-                                show_pip_detection=MASTER_OVERLAY_SHOW_PIPS,
+                                draw_sub_rois=MASTER_OVERLAY_SHOW_PARTICIPANT_DETAILS,
+                                show_slot_labels=MASTER_OVERLAY_SHOW_PARTICIPANTS,
+                                show_pip_detection=(MASTER_OVERLAY_SHOW_PIPS and MASTER_OVERLAY_SHOW_PARTICIPANT_DETAILS),
                                 initiative_side=game_state.battle.initiative.side,
                                 show_empty=not MASTER_OVERLAY_HIDE_EMPTY_SLOTS,
                                 show_legend=MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND,
+                                legend_detailed=MASTER_OVERLAY_SHOW_PARTICIPANT_DETAILS,
+                                use_role_colors=True,
+                                player_slot_index=game_state.battle.player_wizard.slot_index,
+                                player_slot_side=game_state.battle.player_wizard.side,
+                                player_slot_locked=game_state.battle.player_wizard.slot_locked,
                                 player_slot_sigil=game_state.battle.player_wizard.slot_sigil,
                             )
                         if MASTER_OVERLAY_SHOW_INITIATIVE:
                             master = render_initiative_boxes(master, INITIATIVE_CFG, game_state.battle.initiative)
                     _safe_imshow("wizmatic:master", master)
                 else:
-                    if SHOW_INITIATIVE_OVERLAY and result.initiative_overlay is not None:
-                        _safe_imshow("wizmatic:initiative", result.initiative_overlay)
-                    if SHOW_PARTICIPANTS_OVERLAY and result.participants_overlay is not None:
-                        _safe_imshow("wizmatic:participants", result.participants_overlay)
-                    if SHOW_BUTTON_OVERLAY and result.button_overlay is not None:
-                        _safe_imshow("wizmatic:buttons", result.button_overlay)
+                    if SHOW_INITIATIVE_OVERLAY:
+                        _safe_imshow(
+                            "wizmatic:initiative",
+                            render_initiative_overlay(render_base, INITIATIVE_CFG, game_state.battle.initiative),
+                        )
+                    if SHOW_PARTICIPANTS_OVERLAY:
+                        _safe_imshow(
+                            "wizmatic:participants",
+                            render_participants_overlay(
+                                render_base,
+                                game_state.battle.participants,
+                                show_pip_detection=SHOW_PIPDETECTION_OVERLAY,
+                                initiative_side=game_state.battle.initiative.side,
+                                show_empty=True,
+                                show_legend=True,
+                                player_slot_sigil=game_state.battle.player_wizard.slot_sigil,
+                            ),
+                        )
+                    if SHOW_BUTTON_OVERLAY:
+                        button_vis = render_base.copy()
+                        _draw_state_and_buttons(
+                            button_vis,
+                            _format_state_label(state_current),
+                            latest_button_states,
+                            show_buttons=True,
+                        )
+                        _safe_imshow("wizmatic:buttons", button_vis)
 
-                if SHOW_PLAYER_WIZARD_OVERLAY and result.player_wizard_overlay is not None:
-                    _safe_imshow("wizmatic:player_wizard", result.player_wizard_overlay)
+                if SHOW_PLAYER_WIZARD_OVERLAY:
+                    in_battle = state_current in {"battle", "card_select", "round_animation"}
+                    _safe_imshow(
+                        "wizmatic:player_wizard",
+                        render_player_wizard_overlay(
+                            render_base,
+                            game_state.battle.player_wizard,
+                            in_battle=in_battle,
+                        ),
+                    )
 
-                if state_last != state_current:
-                    state_last = state_current
-                    if state_current == "card_select":
-                        # Card Selection logic
-                        if DEBUG_PRINT_STATE_CHANGES:
-                            print("Card Select Mode")
-                        debug_ocr_session_id += 1
-                        if DEBUG_PRINT_NAME_OCR and game_state.battle.participants:
-                            enemies = game_state.battle.participants.enemies
-                            allies = game_state.battle.participants.allies
-                            for p in enemies + allies:
-                                if p is None:
-                                    continue
-                                if not p.name_ocr:
-                                    continue
-                                raw = p.name_raw if p.name_raw else "unknown"
-                                final = p.name if p.name else "unknown"
-                                sigil_label = ((p.sigil or "unknown").strip() or "unknown").title()
-                                if p.name_time_ms is not None:
-                                    if p.name_time_parts:
-                                        cap_ms, prep_ms, ocr_ms, res_ms = p.name_time_parts
-                                        print(
-                                            f"[ocr:name] {sigil_label}: {raw} -> {final} "
-                                            f"({p.name_time_ms:.1f}ms | capture {cap_ms:.1f}ms "
-                                            f"prep {prep_ms:.1f}ms ocr {ocr_ms:.1f}ms "
-                                            f"resolve {res_ms:.1f}ms)"
-                                        )
-                                    else:
-                                        print(f"[ocr:name] {sigil_label}: {raw} -> {final} ({p.name_time_ms:.1f}ms)")
-                                else:
-                                    print(f"[ocr:name] {sigil_label}: {raw} -> {final}")
-                    else:
-                        if DEBUG_PRINT_STATE_CHANGES:
-                            print(f"{_format_state_label(state_current)} Mode")
+            if DEBUG_PRINT_HEALTH_OCR:
+                for line in pop_health_ocr_logs():
+                    print(line)
 
-                if DEBUG_PRINT_HEALTH_OCR:
-                    for line in pop_health_ocr_logs():
-                        print(line)
+            if SHOW_CAPTURE and (not SHOW_MASTER_DEBUG_OVERLAY) and latest_capture_frame is not None:
+                _safe_imshow("W101 Capture", latest_capture_frame)
 
-                # If debug windows are open, close them:
-                if _safe_wait_key():
-                    break
-
-                if SHOW_CAPTURE and (not SHOW_MASTER_DEBUG_OVERLAY):
-                    # Only compute normalized when needed
-                    analysis = bundle.normalized(1280, 720)
-                    _safe_imshow("W101 Capture", analysis)
-
-            if SHOW_CAPTURE:
-                # Required for OpenCV window updates
-                if _safe_wait_key():
-                    break
+            if _safe_wait_key():
+                break
 
             elapsed = time.perf_counter() - t0
             sleep_for = DT - elapsed
@@ -320,6 +419,9 @@ def main():
                 time.sleep(sleep_for)
 
     finally:
+        stop_event.set()
+        task_event.set()
+        analysis_thread.join(timeout=1.0)
         frames.stop()
         cap.close()
 

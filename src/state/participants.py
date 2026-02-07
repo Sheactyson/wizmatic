@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 import time
+import threading
 from typing import Dict, Optional, Tuple, List, Set
 import re
 
@@ -31,17 +32,24 @@ _WORDLIST_TOKEN_INDEX_CACHE: Dict[str, Dict[str, List[int]]] = {}
 _WORDLIST_NORM_MAP_CACHE: Dict[str, Dict[str, str]] = {}
 _EASYOCR_WARNED = False
 _HEALTH_OCR_LOG_QUEUE: List[str] = []
+_HEALTH_OCR_LOG_LOCK = threading.Lock()
 
 _WORDLIST_PREFIX_MAX_LEN = 4
 _WORDLIST_MULTI_SEP = "|"
 
 
 def pop_health_ocr_logs() -> List[str]:
-    if not _HEALTH_OCR_LOG_QUEUE:
-        return []
-    logs = list(_HEALTH_OCR_LOG_QUEUE)
-    _HEALTH_OCR_LOG_QUEUE.clear()
+    with _HEALTH_OCR_LOG_LOCK:
+        if not _HEALTH_OCR_LOG_QUEUE:
+            return []
+        logs = list(_HEALTH_OCR_LOG_QUEUE)
+        _HEALTH_OCR_LOG_QUEUE.clear()
     return logs
+
+
+def _push_health_ocr_log(line: str) -> None:
+    with _HEALTH_OCR_LOG_LOCK:
+        _HEALTH_OCR_LOG_QUEUE.append(line)
 
 
 @dataclass(frozen=True)
@@ -349,33 +357,48 @@ def _prep_tesseract_yellow_numeric(
     cfg: OCRConfig,
     *,
     invert: bool,
+    strict: bool = False,
 ) -> np.ndarray:
-    # Keep only near-exact yellow text (#FFFF00 with tight tolerance).
-    # This is intentionally strict to avoid yellow/green orb background bleed.
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    # Hue around pure yellow (~30 in OpenCV HSV), very high saturation/value.
-    hsv_lower = np.array([28, 235, 235], dtype=np.uint8)
-    hsv_upper = np.array([32, 255, 255], dtype=np.uint8)
-    hsv_mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+    if strict:
+        # Near-exact yellow text (#FFFF00 with tight tolerance). Use for energy.
+        hsv_lower = np.array([25, 220, 220], dtype=np.uint8)
+        hsv_upper = np.array([35, 255, 255], dtype=np.uint8)
+        hsv_mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
 
-    # Near-exact RGB(255,255,0) check with tight per-channel tolerance.
-    tol = 18
-    b = img_bgr[:, :, 0].astype(np.int16)
-    g = img_bgr[:, :, 1].astype(np.int16)
-    r = img_bgr[:, :, 2].astype(np.int16)
-    near_exact_yellow = (
-        (r >= (255 - tol))
-        & (g >= (255 - tol))
-        & (b <= tol)
-        & (np.abs(r - g) <= tol)
-    )
-    bgr_mask = (near_exact_yellow.astype(np.uint8) * 255)
-
-    mask = cv2.bitwise_and(hsv_mask, bgr_mask)
-    kernel = np.ones((2, 2), np.uint8)
-    # Remove isolated noise but do not expand into neighboring colors.
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = cv2.erode(mask, kernel, iterations=1)
+        tol = 24
+        b = img_bgr[:, :, 0].astype(np.int16)
+        g = img_bgr[:, :, 1].astype(np.int16)
+        r = img_bgr[:, :, 2].astype(np.int16)
+        near_exact_yellow = (
+            (r >= (255 - tol))
+            & (g >= (255 - tol))
+            & (b <= tol)
+            & (np.abs(r - g) <= tol)
+        )
+        bgr_mask = (near_exact_yellow.astype(np.uint8) * 255)
+        mask = cv2.bitwise_and(hsv_mask, bgr_mask)
+        kernel = np.ones((2, 2), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    else:
+        # Looser yellow mask for health/mana where background is less problematic.
+        hsv_lower = np.array([18, 145, 150], dtype=np.uint8)
+        hsv_upper = np.array([40, 255, 255], dtype=np.uint8)
+        hsv_mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+        b = img_bgr[:, :, 0].astype(np.int16)
+        g = img_bgr[:, :, 1].astype(np.int16)
+        r = img_bgr[:, :, 2].astype(np.int16)
+        near_yellow = (
+            (r >= 120)
+            & (g >= 120)
+            & (b <= 170)
+            & (np.abs(r - g) <= 95)
+        )
+        bgr_mask = (near_yellow.astype(np.uint8) * 255)
+        mask = cv2.bitwise_and(hsv_mask, bgr_mask)
+        kernel = np.ones((2, 2), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.dilate(mask, kernel, iterations=1)
 
     # OCR target: black digits on white background.
     bin_img = np.full(mask.shape, 255, dtype=np.uint8)
@@ -1951,7 +1974,12 @@ def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Opt
     return (best[1], best[2], best[3])
 
 
-def _ocr_yellow_numeric_text(img_bgr: np.ndarray, cfg: OCRConfig) -> Optional[str]:
+def _ocr_yellow_numeric_text(
+    img_bgr: np.ndarray,
+    cfg: OCRConfig,
+    *,
+    strict_mask: bool = False,
+) -> Optional[str]:
     if pytesseract is None or img_bgr.size == 0:
         return None
     if cfg.tesseract_cmd:
@@ -1966,7 +1994,7 @@ def _ocr_yellow_numeric_text(img_bgr: np.ndarray, cfg: OCRConfig) -> Optional[st
     best_text = None
     best_score = -1
     for invert, psm in attempts:
-        prepped = _prep_tesseract_yellow_numeric(img_bgr, cfg, invert=invert)
+        prepped = _prep_tesseract_yellow_numeric(img_bgr, cfg, invert=invert, strict=strict_mask)
         config = f"--oem {cfg.oem} --psm {psm} -c tessedit_char_whitelist={whitelist}"
         try:
             text = pytesseract.image_to_string(prepped, lang=cfg.lang, config=config)
@@ -2033,41 +2061,53 @@ def extract_player_wizard_state(
             if health_crop is not None and health_crop.size > 0:
                 cv2.imwrite(
                     str(dump_dir / "player_health_roi_prepped.png"),
-                    _prep_tesseract_yellow_numeric(health_crop, ocr_cfg, invert=False),
+                    _prep_tesseract_yellow_numeric(health_crop, ocr_cfg, invert=False, strict=False),
                 )
             if mana_crop is not None and mana_crop.size > 0:
                 cv2.imwrite(
                     str(dump_dir / "player_mana_roi_prepped.png"),
-                    _prep_tesseract_yellow_numeric(mana_crop, ocr_cfg, invert=False),
+                    _prep_tesseract_yellow_numeric(mana_crop, ocr_cfg, invert=False, strict=False),
                 )
             if energy_crop is not None and energy_crop.size > 0:
                 cv2.imwrite(
                     str(dump_dir / "player_energy_roi_prepped.png"),
-                    _prep_tesseract_yellow_numeric(energy_crop, ocr_cfg, invert=False),
+                    _prep_tesseract_yellow_numeric(energy_crop, ocr_cfg, invert=False, strict=True),
                 )
         except Exception:
             pass
 
     if scan_health and health_crop is not None and health_crop.size > 0:
-        health_raw = _ocr_yellow_numeric_text(health_crop, ocr_cfg)
+        health_raw = _ocr_yellow_numeric_text(health_crop, ocr_cfg, strict_mask=False)
         hud_cur, hud_max = _parse_resource_numbers(health_raw)
     else:
         health_raw = carry.health_raw
         hud_cur, hud_max = (carry.health_current, carry.health_max)
 
     if scan_mana and mana_crop is not None and mana_crop.size > 0:
-        mana_raw = _ocr_yellow_numeric_text(mana_crop, ocr_cfg)
+        mana_raw = _ocr_yellow_numeric_text(mana_crop, ocr_cfg, strict_mask=False)
         mana_cur, mana_max = _parse_resource_numbers(mana_raw)
     else:
         mana_raw = carry.mana_raw
         mana_cur, mana_max = (carry.mana_current, carry.mana_max)
+    if mana_cur is None and carry.mana_current is not None:
+        mana_cur = carry.mana_current
+    if mana_max is None and carry.mana_max is not None:
+        mana_max = carry.mana_max
+    if (not mana_raw) and carry.mana_raw:
+        mana_raw = carry.mana_raw
 
     if scan_energy and energy_crop is not None and energy_crop.size > 0:
-        energy_raw = _ocr_yellow_numeric_text(energy_crop, ocr_cfg)
+        energy_raw = _ocr_yellow_numeric_text(energy_crop, ocr_cfg, strict_mask=True)
         energy_cur, energy_max = _parse_resource_numbers(energy_raw)
     else:
         energy_raw = carry.energy_raw
         energy_cur, energy_max = (carry.energy_current, carry.energy_max)
+    if energy_cur is None and carry.energy_current is not None:
+        energy_cur = carry.energy_current
+    if energy_max is None and carry.energy_max is not None:
+        energy_max = carry.energy_max
+    if (not energy_raw) and carry.energy_raw:
+        energy_raw = carry.energy_raw
 
     matches: List[ParticipantState] = []
     if resolve_slot_lookup and participants and participants.detected and hud_cur is not None:
@@ -2205,7 +2245,7 @@ def _log_health_ocr(
             return
         cur_text = "?" if cur is None else str(cur)
         max_text = "?" if maxv is None else str(maxv)
-        _HEALTH_OCR_LOG_QUEUE.append(f'{label}: "{raw}" --> ({cur_text} / {max_text})')
+        _push_health_ocr_log(f'{label}: "{raw}" --> ({cur_text} / {max_text})')
         return
     if cur is None:
         return
@@ -2213,9 +2253,9 @@ def _log_health_ocr(
         return
     delta = cur - prev_cur
     if delta >= 0:
-        _HEALTH_OCR_LOG_QUEUE.append(f'{label}: "{raw}" --> ({prev_cur} + {delta} = {cur})')
+        _push_health_ocr_log(f'{label}: "{raw}" --> ({prev_cur} + {delta} = {cur})')
         return
-    _HEALTH_OCR_LOG_QUEUE.append(f'{label}: "{raw}" --> ({prev_cur} - {abs(delta)} = {cur})')
+    _push_health_ocr_log(f'{label}: "{raw}" --> ({prev_cur} - {abs(delta)} = {cur})')
 
 
 def _count_blobs(mask: np.ndarray, min_area: int, max_area: int) -> int:
@@ -2789,6 +2829,14 @@ def _extract_participant(
         health_raw_text = None
     else:
         health_current, health_max, health_raw_text = _ocr_health(health_crop, cfg.ocr)
+        # Safety: participant HP must be read as "current/max". If slash is missing,
+        # keep prior values to avoid propagating a bad parse.
+        normalized_health_raw = _normalize_health_text(health_raw_text) if health_raw_text else ""
+        if "/" not in normalized_health_raw:
+            if health_override is None:
+                health_current, health_max = (None, None)
+            else:
+                health_current, health_max = health_override
     if health_max_override is not None:
         health_max = health_max_override
     if debug_print_health_ocr and (not skip_health_ocr):
@@ -3220,22 +3268,51 @@ def render_participants_overlay(
     state: ParticipantsState,
     *,
     draw_sub_rois: bool = True,
+    show_slot_labels: bool = True,
     show_pip_detection: bool = False,
     initiative_side: Optional[str] = None,
     show_empty: bool = True,
     show_legend: bool = True,
+    legend_detailed: bool = True,
+    use_role_colors: bool = False,
+    player_slot_index: Optional[int] = None,
+    player_slot_side: str = "ally",
+    player_slot_locked: bool = False,
     player_slot_sigil: Optional[str] = None,
 ) -> np.ndarray:
     vis = frame_bgr.copy()
     aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0]) if frame_bgr.size else "unknown"
     if show_legend:
-        _draw_participants_legend(vis, initiative_side, aspect_key, player_slot_sigil=player_slot_sigil)
+        _draw_participants_legend(
+            vis,
+            initiative_side,
+            aspect_key,
+            player_slot_sigil=player_slot_sigil,
+            player_slot_locked=player_slot_locked,
+            detailed=legend_detailed,
+        )
     for p in state.enemies + state.allies:
         if (not show_empty) and (not p.occupied):
             continue
-        box_color = (0, 255, 255) if p.occupied else (128, 128, 128)
+        if use_role_colors:
+            is_player_slot = (
+                player_slot_index is not None
+                and p.side == player_slot_side
+                and p.index == player_slot_index
+            )
+            if is_player_slot:
+                box_color = (0, 215, 255) if player_slot_locked else (255, 255, 255)  # gold when locked, white while suspected
+            elif p.side == "ally":
+                box_color = (0, 255, 0)  # green
+            elif p.side == "enemy":
+                box_color = (0, 0, 255)  # red
+            else:
+                box_color = (128, 128, 128)
+        else:
+            box_color = (0, 255, 255) if p.occupied else (128, 128, 128)
         draw_relative_roi(vis, p.rel_roi, None, color=box_color, copy=False)
-        _draw_box_label(vis, p)
+        if show_slot_labels:
+            _draw_box_label(vis, p)
         if draw_sub_rois:
             if p.sigil_roi:
                 draw_relative_roi(vis, p.sigil_roi, None, color=(255, 0, 255), copy=False)
@@ -3426,6 +3503,8 @@ def _draw_participants_legend(
     aspect_key: str,
     *,
     player_slot_sigil: Optional[str] = None,
+    player_slot_locked: bool = False,
+    detailed: bool = True,
 ) -> None:
     h, w = vis.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -3442,18 +3521,26 @@ def _draw_participants_legend(
         if cleaned:
             slot_text = cleaned.title()
     player_label = f"Player: {slot_text}"
+    player_color = (0, 215, 255) if player_slot_locked else (255, 255, 255)
 
-    lines = [
-        ("Box", (0, 255, 255)),
-        ("Sigil", (255, 0, 255)),
-        ("School", (0, 165, 255)),
-        ("Name", (255, 0, 0)),
-        ("Hp", (0, 255, 0)),
-        ("Pips", (255, 255, 0)),
-        (player_label, (255, 255, 255)),
-        (init_label, (255, 255, 255)),
-        (aspect_label, (200, 200, 200)),
-    ]
+    if detailed:
+        lines = [
+            ("Box", (0, 255, 255)),
+            ("Sigil", (255, 0, 255)),
+            ("School", (0, 165, 255)),
+            ("Name", (255, 0, 0)),
+            ("Hp", (0, 255, 0)),
+            ("Pips", (255, 255, 0)),
+            (player_label, player_color),
+            (init_label, (255, 255, 255)),
+            (aspect_label, (200, 200, 200)),
+        ]
+    else:
+        lines = [
+            (player_label, player_color),
+            (init_label, (255, 255, 255)),
+            (aspect_label, (200, 200, 200)),
+        ]
 
     x = max(8, int(w * 0.03))
     y = int(h * 0.45)
