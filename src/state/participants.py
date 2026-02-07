@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import time
 from typing import Dict, Optional, Tuple, List, Set
@@ -32,6 +32,7 @@ _EASYOCR_WARNED = False
 _HEALTH_OCR_LOG_QUEUE: List[str] = []
 
 _WORDLIST_PREFIX_MAX_LEN = 4
+_WORDLIST_MULTI_SEP = "|"
 
 
 def pop_health_ocr_logs() -> List[str]:
@@ -101,6 +102,10 @@ class OCRConfig:
     invert: bool = False
     tesseract_cmd: Optional[str] = None
     user_words_path: Optional[str] = None
+    name_resolution_mode: str = "pve"  # "pve" or "pvp"
+    wordlist_wizards_path: Optional[str] = None
+    wordlist_monsters_path: Optional[str] = None
+    wordlist_minions_path: Optional[str] = None
     wordlist_max_distance: int = 2
     wordlist_min_ratio: float = 0.75
     name_blacklist: str = "$§/\\|_`~=+?><,!@#%^&*(}{][)"
@@ -1103,13 +1108,45 @@ def _build_prefix_maps(norms_ns: List[str], max_len: int) -> Dict[int, Dict[str,
     return maps
 
 
+def _split_wordlist_paths(path: Optional[str]) -> List[str]:
+    if not path:
+        return []
+    return [part.strip() for part in str(path).split(_WORDLIST_MULTI_SEP) if part.strip()]
+
+
+def _wordlist_cache_key(path: Optional[str]) -> str:
+    parts = _split_wordlist_paths(path)
+    if not parts:
+        return ""
+    resolved_parts: List[str] = []
+    for part in parts:
+        try:
+            resolved_parts.append(str(Path(part).resolve()))
+        except Exception:
+            resolved_parts.append(str(part))
+    return _WORDLIST_MULTI_SEP.join(resolved_parts)
+
+
+def _combine_wordlist_paths(primary: Optional[str], secondary: Optional[str]) -> Optional[str]:
+    combined: List[str] = []
+    seen: Set[str] = set()
+    for part in _split_wordlist_paths(primary) + _split_wordlist_paths(secondary):
+        if part in seen:
+            continue
+        seen.add(part)
+        combined.append(part)
+    if not combined:
+        return None
+    return _WORDLIST_MULTI_SEP.join(combined)
+
+
 def _load_wordlist_index(
     path: Optional[str],
 ) -> Tuple[List[str], List[str], List[str], Dict[int, Dict[str, List[int]]], Dict[str, List[int]]]:
     words, norms = _load_wordlist(path)
     if not path:
         return (words, norms, [], {}, {})
-    key = str(Path(path).resolve())
+    key = _wordlist_cache_key(path)
     norms_ns = _WORDLIST_NORM_NS_CACHE.get(key, [])
     prefix_maps = _WORDLIST_PREFIX_CACHE.get(key, {})
     token_index = _WORDLIST_TOKEN_INDEX_CACHE.get(key, {})
@@ -1129,8 +1166,10 @@ def _prefix_candidates(prefix_ns: str, prefix_maps: Dict[int, Dict[str, List[int
 def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
     if not path:
         return ([], [])
-    p = Path(path)
-    key = str(p.resolve())
+    parts = _split_wordlist_paths(path)
+    if not parts:
+        return ([], [])
+    key = _wordlist_cache_key(path)
     if (
         key in _WORDLIST_CACHE
         and key in _WORDLIST_NORM_CACHE
@@ -1139,7 +1178,7 @@ def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
         and key in _WORDLIST_NORM_MAP_CACHE
     ):
         return (_WORDLIST_CACHE[key], _WORDLIST_NORM_CACHE[key])
-    if not p.exists():
+    if not any(Path(raw_path).exists() for raw_path in parts):
         _WORDLIST_CACHE[key] = []
         _WORDLIST_NORM_CACHE[key] = []
         _WORDLIST_NORM_NS_CACHE[key] = []
@@ -1150,18 +1189,22 @@ def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
     words: List[str] = []
     norms: List[str] = []
     try:
-        paths: List[Path]
-        if p.is_dir():
-            paths = sorted(p.glob("*.txt"))
-        else:
-            paths = [p]
-        for file_path in paths:
-            for line in file_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                words.append(line)
-                norms.append(_normalize_word(line))
+        for raw_path in parts:
+            p = Path(raw_path)
+            if not p.exists():
+                continue
+            paths: List[Path]
+            if p.is_dir():
+                paths = sorted(p.glob("*.txt"))
+            else:
+                paths = [p]
+            for file_path in paths:
+                for line in file_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    words.append(line)
+                    norms.append(_normalize_word(line))
     except Exception:
         words = []
         norms = []
@@ -1188,6 +1231,34 @@ def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
     _WORDLIST_TOKEN_INDEX_CACHE[key] = token_index
     _WORDLIST_NORM_MAP_CACHE[key] = norm_map
     return (words, norms)
+
+
+def _wordlist_path_for_side(cfg: OCRConfig, side: Optional[str]) -> Optional[str]:
+    mode = (cfg.name_resolution_mode or "pve").strip().lower()
+    if mode == "pvp":
+        return cfg.wordlist_wizards_path or cfg.user_words_path
+    if mode == "pve":
+        if side == "enemy":
+            return cfg.wordlist_monsters_path or cfg.user_words_path
+        if side == "ally":
+            return cfg.wordlist_wizards_path or cfg.user_words_path
+    return cfg.user_words_path
+
+
+def _wordlist_cfg_for_side(cfg: OCRConfig, side: Optional[str]) -> OCRConfig:
+    path = _wordlist_path_for_side(cfg, side)
+    if path == cfg.user_words_path:
+        return cfg
+    return replace(cfg, user_words_path=path)
+
+
+def _should_use_wizard_wordlist(cfg: OCRConfig, side: Optional[str]) -> bool:
+    mode = (cfg.name_resolution_mode or "pve").strip().lower()
+    if mode == "pvp":
+        return True
+    if mode == "pve":
+        return side == "ally"
+    return False
 
 
 def _levenshtein(a: str, b: str, max_dist: int) -> int:
@@ -1217,7 +1288,7 @@ def _levenshtein(a: str, b: str, max_dist: int) -> int:
     return prev[-1]
 
 
-def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig) -> Optional[str]:
+def _apply_wordlist_correction_for_cfg(text: Optional[str], cfg: OCRConfig) -> Optional[str]:
     if not text:
         return text
     truncated = _is_truncated_text(text)
@@ -1227,7 +1298,7 @@ def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig) -> Optional[
     base_norm = _normalize_word(base)
     words, norms = _load_wordlist(cfg.user_words_path)
     if cfg.user_words_path:
-        key = str(Path(cfg.user_words_path).resolve())
+        key = _wordlist_cache_key(cfg.user_words_path)
         norm_map = _WORDLIST_NORM_MAP_CACHE.get(key, {})
         direct = norm_map.get(base_norm)
         if direct:
@@ -1257,6 +1328,41 @@ def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig) -> Optional[
             return match
     fallback = _best_wordlist_fallback(base_norm, cfg)
     return fallback if fallback else text
+
+
+def _is_confident_wordlist_match(base_norm: str, corrected: Optional[str], cfg: OCRConfig) -> bool:
+    if not corrected or not base_norm:
+        return False
+    norm_corrected = _normalize_word(corrected)
+    if not norm_corrected:
+        return False
+    _, norms = _load_wordlist(cfg.user_words_path)
+    if norm_corrected not in norms:
+        return False
+    return _score_wordlist_match(base_norm, corrected) >= cfg.wordlist_min_ratio
+
+
+def _apply_wordlist_correction(text: Optional[str], cfg: OCRConfig, *, side: Optional[str] = None) -> Optional[str]:
+    if not text:
+        return text
+    active_cfg = _wordlist_cfg_for_side(cfg, side)
+    primary = _apply_wordlist_correction_for_cfg(text, active_cfg)
+    if not _should_use_wizard_wordlist(cfg, side):
+        return primary
+    if not cfg.wordlist_minions_path:
+        return primary
+
+    base = _normalize_ocr_input(text.replace("â€¦", "...").replace(".", " "))
+    base_norm = _normalize_word(base) if base else ""
+    if _is_confident_wordlist_match(base_norm, primary, active_cfg):
+        return primary
+
+    expanded_path = _combine_wordlist_paths(active_cfg.user_words_path, cfg.wordlist_minions_path)
+    if (not expanded_path) or expanded_path == active_cfg.user_words_path:
+        return primary
+    expanded_cfg = replace(active_cfg, user_words_path=expanded_path)
+    expanded = _apply_wordlist_correction_for_cfg(text, expanded_cfg)
+    return expanded if expanded else primary
 
 
 def _easyocr_text(
@@ -1474,7 +1580,7 @@ def _batch_easyocr_names(
         if item.end_time is None:
             item.end_time = end_all
         resolve_start = time.perf_counter()
-        final = _apply_wordlist_correction(item.raw, cfg)
+        final = _apply_wordlist_correction(item.raw, cfg, side=item.key[0])
         item.resolve_ms += (time.perf_counter() - resolve_start) * 1000.0
         elapsed_ms = item.capture_ms + item.preprocess_ms + item.ocr_share_ms + item.resolve_ms
         parts = (item.capture_ms, item.preprocess_ms, item.ocr_share_ms, item.resolve_ms)
@@ -2384,7 +2490,7 @@ def _extract_participant(
                 debug_dump_limit=debug_dump_limit,
             )
         name_raw = name_text
-        name_text = _apply_wordlist_correction(name_text, cfg.ocr)
+        name_text = _apply_wordlist_correction(name_text, cfg.ocr, side=side)
         name_time_ms = (time.perf_counter() - name_timer_start) * 1000.0
         name_time_parts = None
         name_ocr = True if name_ocr_override is None else name_ocr_override

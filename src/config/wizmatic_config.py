@@ -3,6 +3,9 @@ TARGET_HZ = 15 #FPS
 DT = 1.0 / TARGET_HZ
 OCR_BACKEND = "tesseract"  # "tesseract" or "easyocr"
 
+# Name Resolution Mode
+NAME_RESOLUTION_MODE = "pve"  # "pve" or "pvp"
+
 # Master Debug Overlay + Settings
 SHOW_MASTER_DEBUG_OVERLAY = True
 MASTER_OVERLAY_SHOW_PARTICIPANTS = True

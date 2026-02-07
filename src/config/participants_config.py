@@ -1,5 +1,5 @@
 from config.roi_config import PARTICIPANT_BOX_PROFILES, PARTICIPANT_LAYOUT
-from config.wizmatic_config import OCR_BACKEND
+from config.wizmatic_config import OCR_BACKEND, NAME_RESOLUTION_MODE
 from state.participants import (
     ParticipantsConfig,
     PipDetectConfig,
@@ -31,6 +31,10 @@ OCR_CFG = OCRConfig(
     invert=False,
     tesseract_cmd="Tesseract\\tesseract.exe",
     user_words_path="src/assets/ocr/wordlist.txt",
+    name_resolution_mode=NAME_RESOLUTION_MODE,
+    wordlist_wizards_path="src/assets/ocr/wizards.txt",
+    wordlist_monsters_path="src/assets/ocr/monsters.txt",
+    wordlist_minions_path="src/assets/ocr/minions.txt",
     wordlist_max_distance=2,
     wordlist_min_ratio=0.75,
     name_blacklist="0123456789$§/\\|_",
