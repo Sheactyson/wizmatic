@@ -394,6 +394,7 @@ def analyze_game_state(
                 lock_health_max=True,
                 force_health_refresh=entered_card_select,
                 force_pips_refresh=entered_card_select,
+                force_school_refresh=entered_card_select,
                 refresh_health_on_force_only=True,
                 refresh_pips_on_force_only=True,
                 timestamp=game_state.updated_at,

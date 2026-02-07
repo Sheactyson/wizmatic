@@ -29,7 +29,6 @@ _WORDLIST_PREFIX_CACHE: Dict[str, Dict[int, Dict[str, List[int]]]] = {}
 _WORDLIST_TOKEN_INDEX_CACHE: Dict[str, Dict[str, List[int]]] = {}
 _WORDLIST_NORM_MAP_CACHE: Dict[str, Dict[str, str]] = {}
 _EASYOCR_WARNED = False
-_HEALTH_ROI_DUMPS: Set[str] = set()
 
 _WORDLIST_PREFIX_MAX_LEN = 4
 
@@ -479,21 +478,17 @@ def _dump_health_roi(
     debug_dump_id: Optional[str],
     prepped: Optional[Tuple[Tuple[str, np.ndarray], ...]] = None,
 ) -> None:
-    if not debug_dump_id or health_crop.size == 0:
+    if health_crop.size == 0:
         return
-    dump_key = f"{debug_dump_id}_{side}_{index}"
-    if dump_key in _HEALTH_ROI_DUMPS:
-        return
-    _HEALTH_ROI_DUMPS.add(dump_key)
     try:
-        stamp = f"{int(time.time() * 1000)}"
-        path = _OCR_DUMP_DIR / f"health_roi_{side}_{index}_{stamp}.png"
+        base = f"health_roi_{side}_{index}"
+        path = _OCR_DUMP_DIR / f"{base}.png"
         cv2.imwrite(str(path), health_crop)
         if prepped:
             for suffix, img in prepped:
                 if img is None or getattr(img, "size", 0) == 0:
                     continue
-                prep_path = _OCR_DUMP_DIR / f"health_roi_{side}_{index}_{stamp}_{suffix}.png"
+                prep_path = _OCR_DUMP_DIR / f"{base}_{suffix}.png"
                 cv2.imwrite(str(prep_path), img)
     except Exception:
         pass
@@ -1892,6 +1887,8 @@ def _match_named_template(
     crop_bgr: np.ndarray,
     templates: List[Tuple[str, np.ndarray]],
     threshold: float,
+    *,
+    pad: int = 0,
 ) -> Tuple[Optional[str], float]:
     if crop_bgr.size == 0 or not templates:
         return None, 0.0
@@ -1900,11 +1897,25 @@ def _match_named_template(
     best_score = -1.0
     for name, templ in templates:
         try:
-            resized = cv2.resize(crop_gray, (templ.shape[1], templ.shape[0]), interpolation=cv2.INTER_AREA)
+            if crop_gray.shape[0] < templ.shape[0] or crop_gray.shape[1] < templ.shape[1]:
+                resized = cv2.resize(crop_gray, (templ.shape[1], templ.shape[0]), interpolation=cv2.INTER_AREA)
+                res = cv2.matchTemplate(resized, templ, cv2.TM_CCOEFF_NORMED)
+            else:
+                if pad > 0:
+                    padded = cv2.copyMakeBorder(
+                        crop_gray,
+                        pad,
+                        pad,
+                        pad,
+                        pad,
+                        cv2.BORDER_REPLICATE,
+                    )
+                else:
+                    padded = crop_gray
+                res = cv2.matchTemplate(padded, templ, cv2.TM_CCOEFF_NORMED)
         except Exception:
             continue
-        res = cv2.matchTemplate(resized, templ, cv2.TM_CCOEFF_NORMED)
-        score = float(res[0][0])
+        score = float(res.max()) if res.size else -1.0
         if score > best_score:
             best_score = score
             best_name = name
@@ -1944,7 +1955,7 @@ def _detect_school(
         cache_key_suffix=side,
         allow_fallback=False,
     )
-    return _match_named_template(school_bgr, templates, cfg.template_threshold)
+    return _match_named_template(school_bgr, templates, cfg.template_threshold, pad=4)
 
 
 def _load_pip_templates(cfg: PipDetectConfig, aspect_key: str) -> List[Tuple[str, np.ndarray]]:
@@ -2195,7 +2206,7 @@ def _extract_participant(
         health_crop = crop_relative(frame_bgr, health_roi)
     if not skip_pip_detect:
         pips_crop = crop_relative(frame_bgr, pips_roi)
-    if not skip_school_detect:
+    if (not skip_school_detect) or debug_dump_school_roi:
         school_crop = crop_relative(frame_bgr, school_roi)
     if school_crop is not None:
         _dump_participant_roi(school_crop, kind="school", side=side, index=index, enabled=debug_dump_school_roi)
@@ -2205,19 +2216,24 @@ def _extract_participant(
     else:
         school_match, school_score = _detect_school(school_crop, cfg.school, aspect_key, side)
 
-    if debug_dump_health and (health_crop is not None) and index == 0 and side in ("enemy", "ally"):
-        prepped = None
+    if debug_dump_health and (health_crop is not None) and side in ("enemy", "ally"):
+        prepped_list: List[Tuple[str, np.ndarray]] = [
+            ("prepped_redmask", _prep_tesseract_health(health_crop, cfg.ocr, invert=False)),
+            ("prepped_redmask_inv", _prep_tesseract_health(health_crop, cfg.ocr, invert=True)),
+        ]
         if cfg.ocr.backend == "easyocr":
-            prepped = (
-                ("prepped", _prep_plain_health(health_crop, cfg.ocr, invert=False)),
-                ("prepped_inv", _prep_plain_health(health_crop, cfg.ocr, invert=True)),
+            prepped_list.extend(
+                [
+                    ("prepped", _prep_plain_health(health_crop, cfg.ocr, invert=False)),
+                    ("prepped_inv", _prep_plain_health(health_crop, cfg.ocr, invert=True)),
+                ]
             )
         _dump_health_roi(
             health_crop,
             side=side,
             index=index,
             debug_dump_id=debug_dump_id,
-            prepped=prepped,
+            prepped=tuple(prepped_list),
         )
 
     tag = f"{side}_{index}_name"
@@ -2402,6 +2418,7 @@ def extract_participants(
     lock_health_max: bool = False,
     force_health_refresh: bool = False,
     force_pips_refresh: bool = False,
+    force_school_refresh: bool = False,
     refresh_health_on_force_only: bool = False,
     refresh_pips_on_force_only: bool = False,
     timestamp: Optional[float] = None,
@@ -2498,6 +2515,9 @@ def extract_participants(
             need_health = True
         if force_pips_refresh:
             need_pips = True
+        if force_school_refresh:
+            if prev.school is None or prev.school == "unknown":
+                need_school = True
 
         refresh_due = _refresh_due(prev)
         if refresh_due:

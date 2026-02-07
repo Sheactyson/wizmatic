@@ -1,7 +1,7 @@
 # Technical settings
 TARGET_HZ = 15 #FPS
 DT = 1.0 / TARGET_HZ
-OCR_BACKEND = "easyocr"  # "tesseract" or "easyocr"
+OCR_BACKEND = "tesseract"  # "tesseract" or "easyocr"
 
 # Master Debug Overlay + Settings
 SHOW_MASTER_DEBUG_OVERLAY = True
@@ -22,11 +22,11 @@ SHOW_BUTTON_OVERLAY = False
 # Debug Dump Toggles
 DEBUG_DUMP_OCR = False
 DEBUG_DUMP_OCR_MAX = 1
-DEBUG_DUMP_HEALTH_ROI = True
+DEBUG_DUMP_HEALTH_ROI = False
 DEBUG_DUMP_EMPTY_NAME_ROI = False
 DEBUG_DUMP_INITIATIVE_ROI = False
 DEBUG_DUMP_SIGIL_ROI = False
-DEBUG_DUMP_SCHOOL_ROI = False
+DEBUG_DUMP_SCHOOL_ROI = True
 DEBUG_DUMP_BUTTON_ROI = False
 
 # Data Refresh Values
