@@ -94,6 +94,34 @@ class ParticipantsState:
 
 
 @dataclass
+class PlayerWizardState:
+    detected: bool = False
+    matched: bool = False
+    side: str = "ally"
+    slot_index: Optional[int] = None
+    slot_sigil: Optional[str] = None
+    slot_confirm_streak: int = 0
+    slot_locked: bool = False
+    name: Optional[str] = None
+    school: Optional[str] = None
+    pips: PipInventory = field(default_factory=PipInventory)
+    health_current: Optional[int] = None
+    health_max: Optional[int] = None
+    mana_current: Optional[int] = None
+    mana_max: Optional[int] = None
+    energy_current: Optional[int] = None
+    energy_max: Optional[int] = None
+    health_raw: Optional[str] = None
+    mana_raw: Optional[str] = None
+    energy_raw: Optional[str] = None
+    health_roi: Optional[Tuple[float, float, float, float]] = None
+    mana_roi: Optional[Tuple[float, float, float, float]] = None
+    energy_roi: Optional[Tuple[float, float, float, float]] = None
+    matched_by: Optional[str] = None  # e.g. "health"
+    timestamp: Optional[float] = None
+
+
+@dataclass
 class BattleState:
     active: bool = False
     in_card_select: bool = False
@@ -102,6 +130,7 @@ class BattleState:
     initiative: InitiativeState = field(default_factory=InitiativeState)
     turn_order: TurnOrderState = field(default_factory=TurnOrderState)
     participants: ParticipantsState = field(default_factory=ParticipantsState)
+    player_wizard: PlayerWizardState = field(default_factory=PlayerWizardState)
 
 
 @dataclass

@@ -8,15 +8,24 @@ import numpy as np
 
 from utils.button_detect import detect_button
 from utils.roi import crop_relative, draw_status_list
-from config.roi_config import BUTTON_ROI_CFG
+from config.roi_config import BUTTON_ROI_CFG, PLAYER_HUD_PROFILES
 from state.game_state import GameState, BattleState
 from state.initiative import InitiativeConfig, extract_initiative, render_initiative_overlay
-from state.participants import ParticipantsConfig, extract_participants, render_participants_overlay
+from state.participants import (
+    ParticipantsConfig,
+    extract_participants,
+    render_participants_overlay,
+    extract_player_wizard_state,
+    render_player_wizard_overlay,
+)
 from config.wizmatic_config import (
     PARTICIPANT_OCCUPANCY_REFRESH_S,
     PARTICIPANT_DETAILS_REFRESH_S,
     INITIATIVE_CAPTURE_WINDOW_S,
     INITIATIVE_STABLE_HOLD_S,
+    PLAYER_WIZARD_UNKNOWN_RESCAN_S,
+    PLAYER_WIZARD_SLOT_CONFIRM_ROUNDS,
+    PLAYER_WIZARD_IDLE_RESCAN_S,
 )
 
 
@@ -28,6 +37,7 @@ class AnalysisResult:
     flee_found: bool
     initiative_overlay: Optional[np.ndarray] = None
     participants_overlay: Optional[np.ndarray] = None
+    player_wizard_overlay: Optional[np.ndarray] = None
     button_overlay: Optional[np.ndarray] = None
     button_states: Optional[Dict[str, bool]] = None
 
@@ -152,6 +162,7 @@ def analyze_game_state(
     participants_cfg: Optional[ParticipantsConfig] = None,
     render_initiative: bool = False,
     render_participants: bool = False,
+    render_player_wizard: bool = False,
     render_pip_detection: bool = False,
     render_button_overlay: bool = False,
     debug_dump_button_rois: bool = False,
@@ -162,10 +173,12 @@ def analyze_game_state(
     debug_dump_empty_names: bool = False,
     debug_dump_sigil_roi: bool = False,
     debug_dump_school_roi: bool = False,
+    debug_dump_player_wizard_roi: bool = False,
     debug_print_health_ocr: bool = True,
     debug_dump_ocr_id: Optional[str] = None,
     debug_dump_ocr_limit: int = 0,
 ) -> AnalysisResult:
+    was_state = game_state.state
     was_in_card_select = game_state.battle.in_card_select
     game_state.updated_at = time.time()
     if analysis is None:
@@ -216,6 +229,8 @@ def analyze_game_state(
 
     resolved_state = _resolve_game_state(game_state.state, button_states)
     game_state.state = resolved_state
+    entered_idle = (resolved_state == STATE_IDLE) and (was_state != STATE_IDLE)
+    in_idle = resolved_state == STATE_IDLE
     in_battle = resolved_state in BATTLE_STATES
     in_card_select = resolved_state == STATE_CARD_SELECT
     game_state.battle.active = in_battle
@@ -224,6 +239,7 @@ def analyze_game_state(
 
     initiative_overlay = None
     participants_overlay = None
+    player_wizard_overlay = None
     button_overlay = None
 
     if (render_button_overlay or debug_dump_button_rois) and button_profile is not None and analysis is not None and button_states is not None:
@@ -418,10 +434,85 @@ def analyze_game_state(
                 )
     else:
         game_state.battle.card_select_started_at = None
+        if in_idle and analysis is not None and participants_cfg is not None:
+            hud_profile = PLAYER_HUD_PROFILES.get(aspect_key) or PLAYER_HUD_PROFILES.get("16:9")
+            if hud_profile is not None:
+                previous_player = game_state.battle.player_wizard
+                should_scan_idle = entered_idle
+                if (
+                    (not should_scan_idle)
+                    and (
+                        previous_player.timestamp is None
+                        or (game_state.updated_at - previous_player.timestamp) >= PLAYER_WIZARD_IDLE_RESCAN_S
+                    )
+                ):
+                    should_scan_idle = True
+                if should_scan_idle:
+                    idle_player = extract_player_wizard_state(
+                        analysis,
+                        game_state.battle.participants,
+                        participants_cfg.ocr,
+                        hud_profile,
+                        previous=previous_player,
+                        timestamp=game_state.updated_at,
+                        debug_dump_rois=debug_dump_player_wizard_roi,
+                        resolve_slot_lookup=False,
+                        slot_confirm_rounds=PLAYER_WIZARD_SLOT_CONFIRM_ROUNDS,
+                        scan_health=True,
+                        scan_mana=True,
+                        scan_energy=True,
+                    )
+                    if previous_player is not None:
+                        if idle_player.health_current is None:
+                            idle_player.health_current = previous_player.health_current
+                        if idle_player.mana_current is None:
+                            idle_player.mana_current = previous_player.mana_current
+                        if idle_player.energy_current is None:
+                            idle_player.energy_current = previous_player.energy_current
+                    game_state.battle.player_wizard = idle_player
         if was_in_card_select and (not game_state.battle.initial_card_select_done):
             game_state.battle.initial_card_select_done = True
         if not in_battle:
+            carry_player = game_state.battle.player_wizard
             game_state.battle = BattleState()
+            game_state.battle.player_wizard = carry_player
+
+    if in_card_select and analysis is not None and participants_cfg is not None:
+        hud_profile = PLAYER_HUD_PROFILES.get(aspect_key) or PLAYER_HUD_PROFILES.get("16:9")
+        if hud_profile is not None:
+            previous_player = game_state.battle.player_wizard
+            retry_unknown_health = (
+                (not previous_player.slot_locked)
+                and (not entered_card_select)
+                and previous_player.timestamp is not None
+                and previous_player.health_current is None
+                and (game_state.updated_at - previous_player.timestamp) >= PLAYER_WIZARD_UNKNOWN_RESCAN_S
+            )
+            should_scan_player = entered_card_select or retry_unknown_health
+            if should_scan_player:
+                scan_health = (not previous_player.slot_locked)
+                scan_mana = entered_card_select
+                game_state.battle.player_wizard = extract_player_wizard_state(
+                    analysis,
+                    game_state.battle.participants,
+                    participants_cfg.ocr,
+                    hud_profile,
+                    previous=previous_player,
+                    timestamp=game_state.updated_at,
+                    debug_dump_rois=debug_dump_player_wizard_roi,
+                    resolve_slot_lookup=((not previous_player.slot_locked) and scan_health),
+                    slot_confirm_rounds=PLAYER_WIZARD_SLOT_CONFIRM_ROUNDS,
+                    scan_health=scan_health,
+                    scan_mana=scan_mana,
+                    scan_energy=False,
+                )
+
+    if render_player_wizard and analysis is not None and (in_battle or (resolved_state == STATE_IDLE)):
+        player_wizard_overlay = render_player_wizard_overlay(
+            analysis,
+            game_state.battle.player_wizard,
+            in_battle=in_battle,
+        )
 
     return AnalysisResult(
         game_state=game_state,
@@ -430,6 +521,7 @@ def analyze_game_state(
         flee_found=flee_found,
         initiative_overlay=initiative_overlay,
         participants_overlay=participants_overlay,
+        player_wizard_overlay=player_wizard_overlay,
         button_overlay=button_overlay,
         button_states=button_states,
     )

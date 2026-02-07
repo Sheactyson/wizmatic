@@ -13,6 +13,7 @@ from config.wizmatic_config import (
     SHOW_PARTICIPANTS_OVERLAY,
     SHOW_PIPDETECTION_OVERLAY,
     SHOW_BUTTON_OVERLAY,
+    SHOW_PLAYER_WIZARD_OVERLAY,
     SHOW_MASTER_DEBUG_OVERLAY,
     DEBUG_DUMP_OCR,
     DEBUG_DUMP_OCR_MAX,
@@ -22,6 +23,7 @@ from config.wizmatic_config import (
     DEBUG_DUMP_SIGIL_ROI,
     DEBUG_DUMP_SCHOOL_ROI,
     DEBUG_DUMP_BUTTON_ROI,
+    DEBUG_DUMP_PLAYER_WIZARD_ROI,
     DEBUG_PRINT_HEALTH_OCR,
     DEBUG_PRINT_NAME_OCR,
     DEBUG_PRINT_STATE_CHANGES,
@@ -157,15 +159,15 @@ def main():
         thickness = 1
         line_h = 16
         pad = 6
-        init_label = "initiative: unknown"
-        aspect_label = "aspect: unknown"
+        init_label = "Initiative: Unknown"
+        aspect_label = "Aspect: Unknown"
         lines = [
-            "box",
-            "sigil",
-            "school",
-            "name",
-            "hp",
-            "pips",
+            "Box",
+            "Sigil",
+            "School",
+            "Name",
+            "Hp",
+            "Pips",
             init_label,
             aspect_label,
         ]
@@ -194,6 +196,7 @@ def main():
 
                 render_initiative = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_INITIATIVE_OVERLAY
                 render_participants = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PARTICIPANTS_OVERLAY
+                render_player_wizard = SHOW_PLAYER_WIZARD_OVERLAY
                 render_buttons = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_BUTTON_OVERLAY
                 render_pips = (not SHOW_MASTER_DEBUG_OVERLAY) and SHOW_PIPDETECTION_OVERLAY
                 collect_buttons = MASTER_OVERLAY_SHOW_BUTTON_LIST
@@ -204,6 +207,7 @@ def main():
                     participants_cfg=PARTICIPANTS_CFG,
                     render_initiative=render_initiative,
                     render_participants=render_participants,
+                    render_player_wizard=render_player_wizard,
                     render_pip_detection=render_pips,
                     render_button_overlay=render_buttons,
                     debug_dump_button_rois=DEBUG_DUMP_BUTTON_ROI,
@@ -214,6 +218,7 @@ def main():
                     debug_dump_empty_names=DEBUG_DUMP_EMPTY_NAME_ROI,
                     debug_dump_sigil_roi=DEBUG_DUMP_SIGIL_ROI,
                     debug_dump_school_roi=DEBUG_DUMP_SCHOOL_ROI,
+                    debug_dump_player_wizard_roi=DEBUG_DUMP_PLAYER_WIZARD_ROI,
                     debug_print_health_ocr=DEBUG_PRINT_HEALTH_OCR,
                     debug_dump_ocr_id=str(debug_ocr_session_id),
                     debug_dump_ocr_limit=DEBUG_DUMP_OCR_MAX,
@@ -240,6 +245,7 @@ def main():
                                 initiative_side=game_state.battle.initiative.side,
                                 show_empty=not MASTER_OVERLAY_HIDE_EMPTY_SLOTS,
                                 show_legend=MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND,
+                                player_slot_sigil=game_state.battle.player_wizard.slot_sigil,
                             )
                         if MASTER_OVERLAY_SHOW_INITIATIVE:
                             master = render_initiative_boxes(master, INITIATIVE_CFG, game_state.battle.initiative)
@@ -251,6 +257,9 @@ def main():
                         _safe_imshow("wizmatic:participants", result.participants_overlay)
                     if SHOW_BUTTON_OVERLAY and result.button_overlay is not None:
                         _safe_imshow("wizmatic:buttons", result.button_overlay)
+
+                if SHOW_PLAYER_WIZARD_OVERLAY and result.player_wizard_overlay is not None:
+                    _safe_imshow("wizmatic:player_wizard", result.player_wizard_overlay)
 
                 if state_last != state_current:
                     state_last = state_current

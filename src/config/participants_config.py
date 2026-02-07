@@ -28,6 +28,7 @@ OCR_CFG = OCRConfig(
     lang="eng",
     name_whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '-",
     health_whitelist="0123456789/,",
+    player_resource_whitelist="0123456789",
     invert=False,
     tesseract_cmd="Tesseract\\tesseract.exe",
     user_words_path="src/assets/ocr/wordlist.txt",

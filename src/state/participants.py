@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 import time
 from typing import Dict, Optional, Tuple, List, Set
@@ -10,7 +11,7 @@ import cv2
 import numpy as np
 
 from utils.roi import crop_relative, draw_relative_roi
-from state.game_state import ParticipantsState, ParticipantState, PipInventory
+from state.game_state import ParticipantsState, ParticipantState, PipInventory, PlayerWizardState
 
 try:
     import pytesseract
@@ -68,6 +69,13 @@ class ParticipantLayout:
 
 
 @dataclass(frozen=True)
+class PlayerHUDProfile:
+    health_roi: Tuple[float, float, float, float]
+    mana_roi: Tuple[float, float, float, float]
+    energy_roi: Tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
 class PipDetectConfig:
     white_sat_max: int = 60
     white_val_min: int = 200
@@ -99,6 +107,7 @@ class OCRConfig:
     lang: str = "eng"
     name_whitelist: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '-."
     health_whitelist: str = "0123456789/,"
+    player_resource_whitelist: str = "0123456789"
     invert: bool = False
     tesseract_cmd: Optional[str] = None
     user_words_path: Optional[str] = None
@@ -333,6 +342,53 @@ def _prep_plain_health(
 ) -> np.ndarray:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     return _prep_ocr(gray, cfg.scale, invert)
+
+
+def _prep_tesseract_yellow_numeric(
+    img_bgr: np.ndarray,
+    cfg: OCRConfig,
+    *,
+    invert: bool,
+) -> np.ndarray:
+    # Keep only near-exact yellow text (#FFFF00 with tight tolerance).
+    # This is intentionally strict to avoid yellow/green orb background bleed.
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    # Hue around pure yellow (~30 in OpenCV HSV), very high saturation/value.
+    hsv_lower = np.array([28, 235, 235], dtype=np.uint8)
+    hsv_upper = np.array([32, 255, 255], dtype=np.uint8)
+    hsv_mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+
+    # Near-exact RGB(255,255,0) check with tight per-channel tolerance.
+    tol = 18
+    b = img_bgr[:, :, 0].astype(np.int16)
+    g = img_bgr[:, :, 1].astype(np.int16)
+    r = img_bgr[:, :, 2].astype(np.int16)
+    near_exact_yellow = (
+        (r >= (255 - tol))
+        & (g >= (255 - tol))
+        & (b <= tol)
+        & (np.abs(r - g) <= tol)
+    )
+    bgr_mask = (near_exact_yellow.astype(np.uint8) * 255)
+
+    mask = cv2.bitwise_and(hsv_mask, bgr_mask)
+    kernel = np.ones((2, 2), np.uint8)
+    # Remove isolated noise but do not expand into neighboring colors.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.erode(mask, kernel, iterations=1)
+
+    # OCR target: black digits on white background.
+    bin_img = np.full(mask.shape, 255, dtype=np.uint8)
+    bin_img[mask > 0] = 0
+    if cfg.scale > 1:
+        bin_img = cv2.resize(
+            bin_img,
+            (bin_img.shape[1] * cfg.scale, bin_img.shape[0] * cfg.scale),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    if invert:
+        bin_img = cv2.bitwise_not(bin_img)
+    return bin_img
 
 
 def _filter_small_components(mask: np.ndarray, min_area_frac: float) -> np.ndarray:
@@ -1895,6 +1951,228 @@ def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Opt
     return (best[1], best[2], best[3])
 
 
+def _ocr_yellow_numeric_text(img_bgr: np.ndarray, cfg: OCRConfig) -> Optional[str]:
+    if pytesseract is None or img_bgr.size == 0:
+        return None
+    if cfg.tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = cfg.tesseract_cmd
+    whitelist = cfg.player_resource_whitelist or "0123456789"
+    attempts = [
+        (False, 7),
+        (True, 7),
+        (False, 6),
+        (True, 6),
+    ]
+    best_text = None
+    best_score = -1
+    for invert, psm in attempts:
+        prepped = _prep_tesseract_yellow_numeric(img_bgr, cfg, invert=invert)
+        config = f"--oem {cfg.oem} --psm {psm} -c tessedit_char_whitelist={whitelist}"
+        try:
+            text = pytesseract.image_to_string(prepped, lang=cfg.lang, config=config)
+        except Exception:
+            text = ""
+        text = text.strip().replace("\n", " ").strip()
+        if not text:
+            continue
+        score = (len(_HEALTH_NUM_RE.findall(text)) * 10) + len(text)
+        if score > best_score:
+            best_text = text
+            best_score = score
+    return best_text
+
+
+def _parse_resource_numbers(text: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    if not text:
+        return (None, None)
+    cur, maxv = _parse_health(text)
+    if cur is not None or maxv is not None:
+        return (cur, maxv)
+    normalized = _normalize_health_text(text).replace(",", "")
+    nums = _HEALTH_NUM_RE.findall(normalized)
+    if not nums:
+        return (None, None)
+    try:
+        return (int(nums[0]), int(nums[1]) if len(nums) > 1 else None)
+    except Exception:
+        return (None, None)
+
+
+def extract_player_wizard_state(
+    frame_bgr: np.ndarray,
+    participants: ParticipantsState,
+    ocr_cfg: OCRConfig,
+    hud_profile: PlayerHUDProfile,
+    *,
+    previous: Optional[PlayerWizardState] = None,
+    timestamp: Optional[float] = None,
+    debug_dump_rois: bool = False,
+    resolve_slot_lookup: bool = True,
+    slot_confirm_rounds: int = 2,
+    scan_health: bool = True,
+    scan_mana: bool = True,
+    scan_energy: bool = False,
+) -> PlayerWizardState:
+    carry = previous if previous is not None else PlayerWizardState()
+    health_crop = crop_relative(frame_bgr, hud_profile.health_roi) if scan_health else None
+    mana_crop = crop_relative(frame_bgr, hud_profile.mana_roi) if scan_mana else None
+    energy_crop = crop_relative(frame_bgr, hud_profile.energy_roi) if scan_energy else None
+
+    if debug_dump_rois:
+        try:
+            dump_dir = Path("debug/player_wizard")
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            if health_crop is not None and health_crop.size > 0:
+                cv2.imwrite(str(dump_dir / "player_health_roi.png"), health_crop)
+            if mana_crop is not None and mana_crop.size > 0:
+                cv2.imwrite(str(dump_dir / "player_mana_roi.png"), mana_crop)
+            if energy_crop is not None and energy_crop.size > 0:
+                cv2.imwrite(str(dump_dir / "player_energy_roi.png"), energy_crop)
+
+            # Also dump yellow-masked prep images to aid OCR tuning.
+            if health_crop is not None and health_crop.size > 0:
+                cv2.imwrite(
+                    str(dump_dir / "player_health_roi_prepped.png"),
+                    _prep_tesseract_yellow_numeric(health_crop, ocr_cfg, invert=False),
+                )
+            if mana_crop is not None and mana_crop.size > 0:
+                cv2.imwrite(
+                    str(dump_dir / "player_mana_roi_prepped.png"),
+                    _prep_tesseract_yellow_numeric(mana_crop, ocr_cfg, invert=False),
+                )
+            if energy_crop is not None and energy_crop.size > 0:
+                cv2.imwrite(
+                    str(dump_dir / "player_energy_roi_prepped.png"),
+                    _prep_tesseract_yellow_numeric(energy_crop, ocr_cfg, invert=False),
+                )
+        except Exception:
+            pass
+
+    if scan_health and health_crop is not None and health_crop.size > 0:
+        health_raw = _ocr_yellow_numeric_text(health_crop, ocr_cfg)
+        hud_cur, hud_max = _parse_resource_numbers(health_raw)
+    else:
+        health_raw = carry.health_raw
+        hud_cur, hud_max = (carry.health_current, carry.health_max)
+
+    if scan_mana and mana_crop is not None and mana_crop.size > 0:
+        mana_raw = _ocr_yellow_numeric_text(mana_crop, ocr_cfg)
+        mana_cur, mana_max = _parse_resource_numbers(mana_raw)
+    else:
+        mana_raw = carry.mana_raw
+        mana_cur, mana_max = (carry.mana_current, carry.mana_max)
+
+    if scan_energy and energy_crop is not None and energy_crop.size > 0:
+        energy_raw = _ocr_yellow_numeric_text(energy_crop, ocr_cfg)
+        energy_cur, energy_max = _parse_resource_numbers(energy_raw)
+    else:
+        energy_raw = carry.energy_raw
+        energy_cur, energy_max = (carry.energy_current, carry.energy_max)
+
+    matches: List[ParticipantState] = []
+    if resolve_slot_lookup and participants and participants.detected and hud_cur is not None:
+        for ally in participants.allies:
+            if (ally is None) or (not ally.occupied):
+                continue
+            if ally.health_current == hud_cur:
+                matches.append(ally)
+
+    selected: Optional[ParticipantState] = None
+    slot_matched_by_health = False
+    defaulted_to_last_slot = False
+    if matches:
+        if carry.slot_index is not None:
+            for cand in matches:
+                if cand.index == carry.slot_index:
+                    selected = cand
+                    break
+        if selected is None:
+            selected = matches[0]
+        slot_matched_by_health = selected is not None
+
+    # If this scan cannot resolve slot by health, default to the last known slot.
+    if (selected is None) and (carry.slot_index is not None) and participants and participants.detected:
+        for ally in participants.allies:
+            if (ally is None) or (not ally.occupied):
+                continue
+            if ally.index == carry.slot_index:
+                selected = ally
+                defaulted_to_last_slot = True
+                break
+
+    if slot_confirm_rounds < 1:
+        slot_confirm_rounds = 1
+    if slot_matched_by_health and selected is not None and (not defaulted_to_last_slot):
+        if carry.matched and carry.slot_index == selected.index:
+            base_streak = carry.slot_confirm_streak if carry.slot_confirm_streak > 0 else 1
+            slot_confirm_streak = base_streak + 1
+        else:
+            slot_confirm_streak = 1
+    else:
+        slot_confirm_streak = carry.slot_confirm_streak
+
+    slot_index: Optional[int]
+    slot_sigil: Optional[str]
+    name: Optional[str]
+    school: Optional[str]
+    pips: PipInventory
+    profile_health_max: Optional[int]
+    if selected is not None:
+        slot_index = selected.index
+        slot_sigil = (selected.sigil or "unknown").strip().title() or "Unknown"
+        name = selected.name
+        school = selected.school
+        pips = selected.pips if selected.pips is not None else PipInventory()
+        profile_health_max = selected.health_max
+    else:
+        slot_index = carry.slot_index
+        slot_sigil = carry.slot_sigil
+        name = carry.name
+        school = carry.school
+        pips = carry.pips if carry.pips is not None else PipInventory()
+        profile_health_max = carry.health_max
+
+    slot_locked = carry.slot_locked or (slot_confirm_streak >= slot_confirm_rounds)
+    if slot_index is None:
+        slot_locked = False
+        slot_confirm_streak = 0
+
+    matched = slot_matched_by_health or (slot_index is not None and (carry.matched or slot_locked))
+    matched_by = "health" if slot_matched_by_health else (carry.matched_by if matched else None)
+
+    resolved_health_cur = hud_cur
+    if (not scan_health) and selected is not None and selected.health_current is not None:
+        resolved_health_cur = selected.health_current
+    resolved_health_max = profile_health_max if profile_health_max is not None else hud_max
+
+    return PlayerWizardState(
+        detected=(resolved_health_cur is not None) or (mana_cur is not None) or (energy_cur is not None),
+        matched=matched,
+        side="ally",
+        slot_index=slot_index,
+        slot_sigil=slot_sigil,
+        slot_confirm_streak=slot_confirm_streak,
+        slot_locked=slot_locked,
+        name=name,
+        school=school,
+        pips=pips,
+        health_current=resolved_health_cur,
+        health_max=resolved_health_max,
+        mana_current=mana_cur,
+        mana_max=mana_max,
+        energy_current=energy_cur,
+        energy_max=energy_max,
+        health_raw=health_raw,
+        mana_raw=mana_raw,
+        energy_raw=energy_raw,
+        health_roi=hud_profile.health_roi,
+        mana_roi=hud_profile.mana_roi,
+        energy_roi=hud_profile.energy_roi,
+        matched_by=matched_by,
+        timestamp=timestamp,
+    )
+
+
 def _log_health_ocr(
     *,
     side: str,
@@ -2946,11 +3224,12 @@ def render_participants_overlay(
     initiative_side: Optional[str] = None,
     show_empty: bool = True,
     show_legend: bool = True,
+    player_slot_sigil: Optional[str] = None,
 ) -> np.ndarray:
     vis = frame_bgr.copy()
     aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0]) if frame_bgr.size else "unknown"
     if show_legend:
-        _draw_participants_legend(vis, initiative_side, aspect_key)
+        _draw_participants_legend(vis, initiative_side, aspect_key, player_slot_sigil=player_slot_sigil)
     for p in state.enemies + state.allies:
         if (not show_empty) and (not p.occupied):
             continue
@@ -2974,27 +3253,204 @@ def render_participants_overlay(
     return vis
 
 
+def render_player_wizard_overlay(
+    frame_bgr: np.ndarray,
+    player: Optional[PlayerWizardState],
+    *,
+    in_battle: bool = True,
+) -> np.ndarray:
+    vis = frame_bgr.copy()
+    if vis.size == 0:
+        return vis
+
+    if player is not None:
+        if player.health_roi is not None:
+            draw_relative_roi(vis, player.health_roi, None, color=(0, 0, 255), copy=False)
+        if player.mana_roi is not None:
+            draw_relative_roi(vis, player.mana_roi, None, color=(255, 0, 0), copy=False)
+        if player.energy_roi is not None:
+            draw_relative_roi(vis, player.energy_roi, None, color=(0, 255, 0), copy=False)
+
+    def _fmt_num(value: Optional[int]) -> str:
+        return "Unknown" if value is None else str(value)
+
+    def _fmt_text(value: Optional[str]) -> str:
+        txt = "" if value is None else str(value).strip()
+        return txt if txt else "Unknown"
+
+    slot = _fmt_text(player.slot_sigil) if player is not None else "Unknown"
+    slot_color = (255, 255, 255)
+    if player is not None and player.slot_locked:
+        slot_color = (0, 215, 255)
+
+    pips = player.pips if (player is not None and player.pips is not None) else PipInventory()
+
+    def _player_pip_label(token: str) -> str:
+        if token == "pip":
+            return "N"
+        if token == "power":
+            return "P"
+        if token in _SCHOOL_COLORS:
+            return token[0].upper()
+        return "?"
+
+    def _player_pip_color(token: str) -> Tuple[int, int, int]:
+        if token in _SCHOOL_COLORS:
+            return _SCHOOL_COLORS[token]
+        if token in ("pip", "power"):
+            return (255, 255, 255)
+        return (200, 200, 200)
+
+    pip_items = [(_player_pip_label(tok), _player_pip_color(tok)) for tok in (pips.tokens or [])]
+    if not pip_items:
+        pip_items = [("?", (200, 200, 200))]
+
+    timestamp = "Unknown"
+    if player is not None and player.timestamp is not None:
+        try:
+            timestamp = datetime.fromtimestamp(player.timestamp).strftime("%H:%M:%S")
+        except Exception:
+            timestamp = "Unknown"
+
+    health_cur = _fmt_num(player.health_current) if player is not None else "Unknown"
+    health_max = _fmt_num(player.health_max) if player is not None else "Unknown"
+    mana_cur = _fmt_num(player.mana_current) if player is not None else "Unknown"
+    mana_max = _fmt_num(player.mana_max) if player is not None else "Unknown"
+    energy_cur = _fmt_num(player.energy_current) if player is not None else "Unknown"
+
+    h, w = vis.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.45
+    thickness = 1
+    line_h = 18
+    pad = 8
+
+    if in_battle:
+        rows: List[Tuple[str, str, Tuple[int, int, int]]] = [
+            ("text", "Player Wizard", (255, 255, 255)),
+            ("text", f"Player Slot: {slot}", slot_color),
+            ("text", f"Slot Confirm Streak: {player.slot_confirm_streak if player is not None else 0}", (255, 255, 255)),
+            ("text", f"Name: {_fmt_text(player.name) if player is not None else 'Unknown'}", (255, 255, 255)),
+            ("text", f"School: {_fmt_text(player.school) if player is not None else 'Unknown'}", (255, 255, 255)),
+            ("text", f"Pips: {pips.total} (N:{pips.normal} P:{pips.power} S:{pips.school})", (255, 255, 255)),
+            ("tokens", "Pip Tokens:", (200, 200, 200)),
+            ("text", f"Health: {health_cur}/{health_max}", (0, 0, 255)),
+            ("text", f"Mana: {mana_cur}/{mana_max}", (255, 0, 0)),
+            ("text", f"Timestamp (Local): {timestamp}", (200, 200, 200)),
+        ]
+    else:
+        rows = [
+            ("text", "Player Resources", (255, 255, 255)),
+            ("text", f"Health: {health_cur}", (0, 0, 255)),
+            ("text", f"Mana: {mana_cur}", (255, 0, 0)),
+            ("text", f"Energy: {energy_cur}", (0, 255, 0)),
+            ("text", f"Timestamp (Local): {timestamp}", (200, 200, 200)),
+        ]
+
+    def _text_w(text: str) -> int:
+        (tw, _), _ = cv2.getTextSize(text, font, scale, thickness)
+        return tw
+
+    def _fit_text(text: str, max_w: int) -> str:
+        if _text_w(text) <= max_w:
+            return text
+        ell = "..."
+        if _text_w(ell) >= max_w:
+            return ell
+        trimmed = text
+        while trimmed and _text_w(trimmed + ell) > max_w:
+            trimmed = trimmed[:-1]
+        return (trimmed + ell) if trimmed else ell
+
+    max_text_w_cap = max(220, int(w * 0.42))
+    token_prefix_w = _text_w("Pip Tokens:") + 6
+    token_items_fit = list(pip_items)
+    token_total_w = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _ in token_items_fit)
+    while token_items_fit and token_total_w > max_text_w_cap:
+        token_items_fit.pop()
+        token_total_w = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _ in token_items_fit)
+    if not token_items_fit:
+        token_items_fit = [("?", (200, 200, 200))]
+    if len(token_items_fit) < len(pip_items):
+        token_items_fit.append(("...", (255, 255, 255)))
+
+    fitted_rows: List[Tuple[str, str, Tuple[int, int, int]]] = []
+    max_w_px = 0
+    for kind, text, color in rows:
+        if kind == "tokens":
+            width_px = token_prefix_w + sum(_text_w(lbl) + 6 for lbl, _ in token_items_fit)
+            max_w_px = max(max_w_px, min(width_px, max_text_w_cap))
+            fitted_rows.append((kind, text, color))
+            continue
+        fit = _fit_text(text, max_text_w_cap)
+        max_w_px = max(max_w_px, _text_w(fit))
+        fitted_rows.append((kind, fit, color))
+
+    box_w = max_w_px + pad * 2
+    box_h = (line_h * len(fitted_rows)) + pad * 2
+    x1 = max(2, w - box_w - 8)
+    y1 = max(2, min(h - box_h - 2, 8))
+    x2 = min(w - 2, x1 + box_w)
+    y2 = min(h - 2, y1 + box_h)
+
+    overlay = vis.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.45, vis, 0.55, 0, vis)
+
+    ty = y1 + pad + line_h - 4
+    for kind, text, color in fitted_rows:
+        if kind == "tokens":
+            cursor = x1 + pad
+            cv2.putText(vis, text, (cursor, ty), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+            cv2.putText(vis, text, (cursor, ty), font, scale, color, thickness, cv2.LINE_AA)
+            cursor += _text_w(text) + 6
+            for lbl, tok_color in token_items_fit:
+                cv2.putText(vis, lbl, (cursor, ty), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+                cv2.putText(vis, lbl, (cursor, ty), font, scale, tok_color, thickness, cv2.LINE_AA)
+                cursor += _text_w(lbl) + 6
+            ty += line_h
+            continue
+        cv2.putText(vis, text, (x1 + pad, ty), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+        cv2.putText(vis, text, (x1 + pad, ty), font, scale, color, thickness, cv2.LINE_AA)
+        ty += line_h
+    return vis
+
+
 _ALLY_SIGILS = ["sun", "eye", "star", "moon"]
 _ENEMY_SIGILS = ["dagger", "key", "ruby", "spiral"]
 
 
-def _draw_participants_legend(vis: np.ndarray, initiative_side: Optional[str], aspect_key: str) -> None:
+def _draw_participants_legend(
+    vis: np.ndarray,
+    initiative_side: Optional[str],
+    aspect_key: str,
+    *,
+    player_slot_sigil: Optional[str] = None,
+) -> None:
     h, w = vis.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.45
     thickness = 1
     line_h = 16
     pad = 6
-    init_label = f"initiative: {initiative_side or 'unknown'}"
-    aspect_label = f"aspect: {aspect_key}"
+    init_value = str(initiative_side).strip().title() if initiative_side else "Unknown"
+    init_label = f"Initiative: {init_value}"
+    aspect_label = f"Aspect: {aspect_key}"
+    slot_text = "Unknown"
+    if player_slot_sigil is not None:
+        cleaned = str(player_slot_sigil).strip()
+        if cleaned:
+            slot_text = cleaned.title()
+    player_label = f"Player: {slot_text}"
 
     lines = [
-        ("box", (0, 255, 255)),
-        ("sigil", (255, 0, 255)),
-        ("school", (0, 165, 255)),
-        ("name", (255, 0, 0)),
-        ("hp", (0, 255, 0)),
-        ("pips", (255, 255, 0)),
+        ("Box", (0, 255, 255)),
+        ("Sigil", (255, 0, 255)),
+        ("School", (0, 165, 255)),
+        ("Name", (255, 0, 0)),
+        ("Hp", (0, 255, 0)),
+        ("Pips", (255, 255, 0)),
+        (player_label, (255, 255, 255)),
         (init_label, (255, 255, 255)),
         (aspect_label, (200, 200, 200)),
     ]

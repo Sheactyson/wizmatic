@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Dict, Tuple
 
 from state.initiative import RingProfile
-from state.participants import ParticipantBoxProfile, ParticipantLayout
+from state.participants import ParticipantBoxProfile, ParticipantLayout, PlayerHUDProfile
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,26 @@ PARTICIPANT_LAYOUT = ParticipantLayout(
     pips_roi_enemy=(0.25, 0.00, 0.985, 0.25),
     pips_roi_ally=(0.25, 0.67, 0.99, 0.95),
 )
+
+
+PLAYER_HUD_PROFILES: Dict[str, PlayerHUDProfile] = {
+    # Bottom-left HUD numeric overlays: health (red orb), mana (blue orb), energy (green orb).
+    "4:3": PlayerHUDProfile(
+        health_roi=(0.032, 0.838, 0.115, 0.902),
+        mana_roi=(0.124, 0.838, 0.205, 0.902),
+        energy_roi=(0.215, 0.838, 0.296, 0.902),
+    ),
+    "16:9": PlayerHUDProfile(
+        health_roi=(0.018, 0.83, 0.09, 0.873),
+        mana_roi=(0.08, 0.88, 0.13, 0.923),
+        energy_roi=(0.042, 0.908, 0.078, 0.942),
+    ),
+    "43:18": PlayerHUDProfile(
+        health_roi=(0.022, 0.845, 0.077, 0.908),
+        mana_roi=(0.08, 0.845, 0.141, 0.908),
+        energy_roi=(0.150, 0.845, 0.205, 0.908),
+    ),
+}
 
 
 @dataclass(frozen=True)
