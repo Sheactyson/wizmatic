@@ -29,8 +29,17 @@ _WORDLIST_PREFIX_CACHE: Dict[str, Dict[int, Dict[str, List[int]]]] = {}
 _WORDLIST_TOKEN_INDEX_CACHE: Dict[str, Dict[str, List[int]]] = {}
 _WORDLIST_NORM_MAP_CACHE: Dict[str, Dict[str, str]] = {}
 _EASYOCR_WARNED = False
+_HEALTH_OCR_LOG_QUEUE: List[str] = []
 
 _WORDLIST_PREFIX_MAX_LEN = 4
+
+
+def pop_health_ocr_logs() -> List[str]:
+    if not _HEALTH_OCR_LOG_QUEUE:
+        return []
+    logs = list(_HEALTH_OCR_LOG_QUEUE)
+    _HEALTH_OCR_LOG_QUEUE.clear()
+    return logs
 
 
 @dataclass(frozen=True)
@@ -88,7 +97,7 @@ class OCRConfig:
     oem: int = 1
     lang: str = "eng"
     name_whitelist: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '-."
-    health_whitelist: str = "0123456789/"
+    health_whitelist: str = "0123456789/,"
     invert: bool = False
     tesseract_cmd: Optional[str] = None
     user_words_path: Optional[str] = None
@@ -1565,45 +1574,42 @@ def _ocr_text(
     return text or None
 
 
-_HEALTH_RE = re.compile(r"(\d+)\s*[/\\|Iil]\s*(\d+)")
 _HEALTH_NUM_RE = re.compile(r"\d+")
+
+
+def _normalize_health_text(text: str) -> str:
+    cleaned = str(text)
+    cleaned = cleaned.translate(str.maketrans({"\\": "/", "|": "/", "I": "/", "l": "/", "i": "/"}))
+    cleaned = re.sub(r"[^0-9,/\s]", "", cleaned)
+    return cleaned.replace(" ", "")
 
 
 def _parse_health(text: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
     if not text:
         return (None, None)
-    m = _HEALTH_RE.search(text)
-    if m:
+    normalized = _normalize_health_text(text).replace(",", "")
+    if not normalized:
+        return (None, None)
+    if "/" in normalized:
+        left, right = normalized.split("/", 1)
+        right = right.split("/", 1)[0]
+        left_digits = "".join(ch for ch in left if ch.isdigit())
+        right_digits = "".join(ch for ch in right if ch.isdigit())
         try:
-            cur = int(m.group(1))
-            maxv = int(m.group(2))
+            cur = int(left_digits) if left_digits else None
+            maxv = int(right_digits) if right_digits else None
+            if cur is None and maxv is None:
+                return (None, None)
             return (cur, maxv)
         except Exception:
             return (None, None)
-    nums = _HEALTH_NUM_RE.findall(text)
-    if len(nums) >= 2:
-        try:
-            return (int(nums[0]), int(nums[1]))
-        except Exception:
-            return (None, None)
-    if len(nums) == 1:
+    nums = _HEALTH_NUM_RE.findall(normalized)
+    if len(nums) >= 1:
         try:
             return (int(nums[0]), None)
         except Exception:
             return (None, None)
     return (None, None)
-
-
-def _first_number(text: Optional[str]) -> Optional[int]:
-    if not text:
-        return None
-    m = _HEALTH_NUM_RE.search(text)
-    if not m:
-        return None
-    try:
-        return int(m.group(0))
-    except Exception:
-        return None
 
 
 def _health_score(cur: Optional[int], maxv: Optional[int]) -> int:
@@ -1664,35 +1670,16 @@ def _normalize_health_pair(cur: Optional[int], maxv: Optional[int]) -> Tuple[Opt
     return (cur, maxv)
 
 
-def _ocr_health_split(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int]]:
+def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int], Optional[str]]:
     if img_bgr.size == 0:
-        return (None, None)
-    h, w = img_bgr.shape[:2]
-    if w == 0:
-        return (None, None)
-    left_end = max(1, int(w * 0.60))
-    right_start = min(w - 1, int(w * 0.40))
-    left_crop = img_bgr[:, :left_end]
-    right_crop = img_bgr[:, right_start:]
-    digits_only = "0123456789"
-    left_text = _ocr_text(left_crop, cfg, digits_only, prefer_red=True, clahe=True)
-    right_text = _ocr_text(right_crop, cfg, digits_only, prefer_red=True, clahe=True)
-    if not left_text and not right_text:
-        left_text = _ocr_text(left_crop, cfg, digits_only, prefer_red=True, clahe=True, invert_override=True)
-        right_text = _ocr_text(right_crop, cfg, digits_only, prefer_red=True, clahe=True, invert_override=True)
-    return (_first_number(left_text), _first_number(right_text))
-
-
-def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int]]:
-    if img_bgr.size == 0:
-        return (None, None)
+        return (None, None, None)
     try:
         from ocr_easy.adapter import read_text, read_text_with_boxes
     except Exception:
-        return (None, None)
+        return (None, None, None)
 
     def _read_combined(prepped: np.ndarray) -> str:
-        results = read_text_with_boxes(prepped, cfg, allowlist="0123456789/")
+        results = read_text_with_boxes(prepped, cfg, allowlist="0123456789/,")
         if results:
             def _x_min(bbox: List[Tuple[float, float]]) -> float:
                 return min((pt[0] for pt in bbox), default=0.0)
@@ -1704,7 +1691,7 @@ def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int],
                     parts.append(cleaned)
             if parts:
                 return " ".join(parts)
-        return read_text(prepped, cfg, allowlist="0123456789/") or ""
+        return read_text(prepped, cfg, allowlist="0123456789/,") or ""
 
     def _parse_text(text: str) -> Tuple[Optional[int], Optional[int]]:
         cur, maxv = _parse_health(text)
@@ -1719,6 +1706,7 @@ def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int],
 
     best_cur = None
     best_max = None
+    best_text = None
 
     attempts = [
         (False, True, False),
@@ -1741,18 +1729,20 @@ def _easyocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int],
         cur, maxv = _parse_text(text)
         if cur is not None:
             best_cur = cur
+            best_text = text
         if maxv is not None:
             best_max = maxv
+            best_text = text
         if cur is not None and maxv is not None:
-            return (cur, maxv)
+            return (cur, maxv, text or None)
 
     if best_cur is not None or best_max is not None:
-        return (best_cur, best_max)
-    return (None, None)
+        return (best_cur, best_max, best_text)
+    return (None, None, None)
 
 
-def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int]]:
-    candidates: List[Tuple[int, Optional[int], Optional[int]]] = []
+def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    candidates: List[Tuple[int, Optional[int], Optional[int], Optional[str]]] = []
 
     def _try(text: Optional[str]) -> None:
         if not text:
@@ -1761,15 +1751,15 @@ def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Opt
         cur, maxv = _normalize_health_pair(cur, maxv)
         if cur is None and maxv is None:
             return
-        candidates.append((_health_score(cur, maxv), cur, maxv))
+        candidates.append((_health_score(cur, maxv), cur, maxv, text.strip()))
 
     if cfg.backend == "easyocr":
-        easy_cur, easy_max = _easyocr_health(img_bgr, cfg)
+        easy_cur, easy_max, easy_text = _easyocr_health(img_bgr, cfg)
         easy_cur, easy_max = _normalize_health_pair(easy_cur, easy_max)
         if easy_cur is not None or easy_max is not None:
-            candidates.append((_health_score(easy_cur, easy_max), easy_cur, easy_max))
+            candidates.append((_health_score(easy_cur, easy_max), easy_cur, easy_max, easy_text))
 
-    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True, clahe=True))
+    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True, clahe=True, psm_override=7))
     _try(
         _ocr_text(
             img_bgr,
@@ -1778,6 +1768,7 @@ def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Opt
             prefer_red=True,
             clahe=True,
             invert_override=True,
+            psm_override=7,
         )
     )
     _try(
@@ -1787,23 +1778,60 @@ def _ocr_health(img_bgr: np.ndarray, cfg: OCRConfig) -> Tuple[Optional[int], Opt
             cfg.health_whitelist,
             prefer_red=True,
             invert_override=True,
+            psm_override=7,
         )
     )
-    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True))
-
-    best = max(candidates, key=lambda item: item[0], default=None)
-    if best is not None and best[2] is not None:
-        return (best[1], best[2])
-
-    split_cur, split_max = _ocr_health_split(img_bgr, cfg)
-    split_cur, split_max = _normalize_health_pair(split_cur, split_max)
-    if split_cur is not None or split_max is not None:
-        candidates.append((_health_score(split_cur, split_max), split_cur, split_max))
+    _try(_ocr_text(img_bgr, cfg, cfg.health_whitelist, prefer_red=True, psm_override=7))
 
     best = max(candidates, key=lambda item: item[0], default=None)
     if best is None:
-        return (None, None)
-    return (best[1], best[2])
+        return (None, None, None)
+    return (best[1], best[2], best[3])
+
+
+def _log_health_ocr(
+    *,
+    side: str,
+    index: int,
+    sigil: Optional[str],
+    name: Optional[str],
+    raw_text: Optional[str],
+    prev_cur: Optional[int],
+    prev_max: Optional[int],
+    cur: Optional[int],
+    maxv: Optional[int],
+    allow_initial_read: bool = False,
+) -> None:
+    enemy_sigils = ("Dagger", "Key", "Ruby", "Spiral")
+    ally_sigils = ("Sun", "Eye", "Star", "Moon")
+    slot_sigil = None
+    if sigil and sigil.strip():
+        slot_sigil = sigil.strip().title()
+    else:
+        fallback = enemy_sigils if side == "enemy" else ally_sigils
+        if 0 <= index < len(fallback):
+            slot_sigil = fallback[index]
+        else:
+            slot_sigil = "Unknown"
+    who = (name or "unknown").strip() or "unknown"
+    raw = (raw_text or "unknown").strip() or "unknown"
+    label = f"[ocr:hp] {slot_sigil} ({who})"
+    if prev_cur is None:
+        if (not allow_initial_read) or (cur is None and maxv is None):
+            return
+        cur_text = "?" if cur is None else str(cur)
+        max_text = "?" if maxv is None else str(maxv)
+        _HEALTH_OCR_LOG_QUEUE.append(f'{label}: "{raw}" --> ({cur_text} / {max_text})')
+        return
+    if cur is None:
+        return
+    if cur == prev_cur:
+        return
+    delta = cur - prev_cur
+    if delta >= 0:
+        _HEALTH_OCR_LOG_QUEUE.append(f'{label}: "{raw}" --> ({prev_cur} + {delta} = {cur})')
+        return
+    _HEALTH_OCR_LOG_QUEUE.append(f'{label}: "{raw}" --> ({prev_cur} - {abs(delta)} = {cur})')
 
 
 def _count_blobs(mask: np.ndarray, min_area: int, max_area: int) -> int:
@@ -2139,6 +2167,8 @@ def _extract_participant(
     debug_dump_empty_names: bool = False,
     debug_dump_sigil_roi: bool = False,
     debug_dump_school_roi: bool = False,
+    debug_print_health_ocr: bool = True,
+    debug_print_health_ocr_initial_read: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
     sigil_override: Optional[str] = None,
@@ -2362,15 +2392,34 @@ def _extract_participant(
     if (not skip_name_ocr) and (not name_text) and debug_dump and (not debug_dump_empty_names) and debug_dump_id:
         _remove_ocr_dumps_with_prefix(tag, dump_id=slot_dump_id)
 
+    prev_health_current = None
+    prev_health_max = None
+    if health_override is not None:
+        prev_health_current, prev_health_max = health_override
+
     if skip_health_ocr:
         if health_override is None:
             health_current, health_max = (None, None)
         else:
             health_current, health_max = health_override
+        health_raw_text = None
     else:
-        health_current, health_max = _ocr_health(health_crop, cfg.ocr)
+        health_current, health_max, health_raw_text = _ocr_health(health_crop, cfg.ocr)
     if health_max_override is not None:
         health_max = health_max_override
+    if debug_print_health_ocr and (not skip_health_ocr):
+        _log_health_ocr(
+            side=side,
+            index=index,
+            sigil=sigil_match,
+            name=name_text,
+            raw_text=health_raw_text,
+            prev_cur=prev_health_current,
+            prev_max=prev_health_max,
+            cur=health_current,
+            maxv=health_max,
+            allow_initial_read=debug_print_health_ocr_initial_read,
+        )
     if skip_pip_detect:
         pips = pips_override if pips_override is not None else PipInventory()
     else:
@@ -2427,6 +2476,8 @@ def extract_participants(
     debug_dump_empty_names: bool = False,
     debug_dump_sigil_roi: bool = False,
     debug_dump_school_roi: bool = False,
+    debug_print_health_ocr: bool = True,
+    debug_print_health_ocr_initial_read: bool = False,
     debug_dump_id: Optional[str] = None,
     debug_dump_limit: int = 0,
 ) -> ParticipantsState:
@@ -2719,6 +2770,8 @@ def extract_participants(
                 debug_dump_empty_names=debug_dump_empty_names,
                 debug_dump_sigil_roi=debug_dump_sigil_roi,
                 debug_dump_school_roi=debug_dump_school_roi,
+                debug_print_health_ocr=debug_print_health_ocr,
+                debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
                 sigil_override=enemy_sigil,
@@ -2760,6 +2813,8 @@ def extract_participants(
                 debug_dump_empty_names=debug_dump_empty_names,
                 debug_dump_sigil_roi=debug_dump_sigil_roi,
                 debug_dump_school_roi=debug_dump_school_roi,
+                debug_print_health_ocr=debug_print_health_ocr,
+                debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
                 debug_dump_id=debug_dump_id,
                 debug_dump_limit=debug_dump_limit,
                 sigil_override=ally_sigil,

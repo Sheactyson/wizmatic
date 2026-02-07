@@ -22,6 +22,9 @@ from config.wizmatic_config import (
     DEBUG_DUMP_SIGIL_ROI,
     DEBUG_DUMP_SCHOOL_ROI,
     DEBUG_DUMP_BUTTON_ROI,
+    DEBUG_PRINT_HEALTH_OCR,
+    DEBUG_PRINT_NAME_OCR,
+    DEBUG_PRINT_STATE_CHANGES,
     OCR_BACKEND,
     MASTER_OVERLAY_SHOW_PARTICIPANTS,
     MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND,
@@ -32,7 +35,7 @@ from config.wizmatic_config import (
 )
 from config.participants_config import PARTICIPANTS_CFG
 from state.initiative import render_initiative_boxes
-from state.participants import render_participants_overlay
+from state.participants import render_participants_overlay, pop_health_ocr_logs
 
 def main():
     if OCR_BACKEND == "easyocr":
@@ -211,6 +214,7 @@ def main():
                     debug_dump_empty_names=DEBUG_DUMP_EMPTY_NAME_ROI,
                     debug_dump_sigil_roi=DEBUG_DUMP_SIGIL_ROI,
                     debug_dump_school_roi=DEBUG_DUMP_SCHOOL_ROI,
+                    debug_print_health_ocr=DEBUG_PRINT_HEALTH_OCR,
                     debug_dump_ocr_id=str(debug_ocr_session_id),
                     debug_dump_ocr_limit=DEBUG_DUMP_OCR_MAX,
                 )
@@ -252,9 +256,10 @@ def main():
                     state_last = state_current
                     if state_current == "card_select":
                         # Card Selection logic
-                        print("Card Select Mode")
+                        if DEBUG_PRINT_STATE_CHANGES:
+                            print("Card Select Mode")
                         debug_ocr_session_id += 1
-                        if game_state.battle.participants:
+                        if DEBUG_PRINT_NAME_OCR and game_state.battle.participants:
                             enemies = game_state.battle.participants.enemies
                             allies = game_state.battle.participants.allies
                             for p in enemies + allies:
@@ -264,21 +269,27 @@ def main():
                                     continue
                                 raw = p.name_raw if p.name_raw else "unknown"
                                 final = p.name if p.name else "unknown"
+                                sigil_label = ((p.sigil or "unknown").strip() or "unknown").title()
                                 if p.name_time_ms is not None:
                                     if p.name_time_parts:
                                         cap_ms, prep_ms, ocr_ms, res_ms = p.name_time_parts
                                         print(
-                                            f"[ocr:name] {p.side} {p.index}: {raw} -> {final} "
+                                            f"[ocr:name] {sigil_label}: {raw} -> {final} "
                                             f"({p.name_time_ms:.1f}ms | capture {cap_ms:.1f}ms "
                                             f"prep {prep_ms:.1f}ms ocr {ocr_ms:.1f}ms "
                                             f"resolve {res_ms:.1f}ms)"
                                         )
                                     else:
-                                        print(f"[ocr:name] {p.side} {p.index}: {raw} -> {final} ({p.name_time_ms:.1f}ms)")
+                                        print(f"[ocr:name] {sigil_label}: {raw} -> {final} ({p.name_time_ms:.1f}ms)")
                                 else:
-                                    print(f"[ocr:name] {p.side} {p.index}: {raw} -> {final}")
+                                    print(f"[ocr:name] {sigil_label}: {raw} -> {final}")
                     else:
-                        print(f"{_format_state_label(state_current)} Mode")
+                        if DEBUG_PRINT_STATE_CHANGES:
+                            print(f"{_format_state_label(state_current)} Mode")
+
+                if DEBUG_PRINT_HEALTH_OCR:
+                    for line in pop_health_ocr_logs():
+                        print(line)
 
                 # If debug windows are open, close them:
                 if _safe_wait_key():
