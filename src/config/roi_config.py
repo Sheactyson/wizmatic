@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 from state.initiative import RingProfile
 from state.participants import ParticipantBoxProfile, ParticipantLayout, PlayerHUDProfile
@@ -14,6 +14,7 @@ class ButtonROIProfile:
     friends_rel_roi: Tuple[float, float, float, float]
     social_rel_roi: Tuple[float, float, float, float]
     spell_book_rel_roi: Tuple[float, float, float, float]
+    concede_rel_roi: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ BUTTON_ROI_CFG = ButtonROIConfig(
             friends_rel_roi=(0.938, 0.025, 0.985, 0.08),
             social_rel_roi=(0.942, 0.13, 0.982, 0.185),
             spell_book_rel_roi=(0.89, 0.83, 0.95, 0.96),
+            concede_rel_roi=(0.665, 0.615, 0.802, 0.683),
         ),
         "16:9": ButtonROIProfile(
             pass_rel_roi=(0.28, 0.61, 0.38, 0.675),
@@ -41,6 +43,7 @@ BUTTON_ROI_CFG = ButtonROIConfig(
             friends_rel_roi=(0.96, 0.025, 0.985, 0.08),
             social_rel_roi=(0.96, 0.125, 0.985, 0.185),
             spell_book_rel_roi=(0.917, 0.83, 0.96, 0.96),
+            concede_rel_roi=(0.62, 0.61, 0.72, 0.675),
         ),
         "43:18": ButtonROIProfile(
             pass_rel_roi=(0.335, 0.61, 0.413, 0.68),
@@ -50,6 +53,7 @@ BUTTON_ROI_CFG = ButtonROIConfig(
             friends_rel_roi=(0.967, 0.025, 0.992, 0.08),
             social_rel_roi=(0.969, 0.127, 0.99, 0.184),
             spell_book_rel_roi=(0.94, 0.83, 0.975, 0.96),
+            concede_rel_roi=(0.588, 0.61, 0.665, 0.68),
         ),
     }
 )
@@ -126,44 +130,70 @@ PLAYER_HUD_PROFILES: Dict[str, PlayerHUDProfile] = {
 # Debug dump upscale factor applied before pip-slot guideline/crop slicing.
 PIP_SLOT_DEBUG_UPSCALE: int = 4
 
-# `PIP_SLOT_WIDTH_PX_BY_ASPECT` is the width of one pip slot in pixels,
+# `PIP_SLOT_WIDTH_PX_BY_ASPECT_ALLY` is the width of one pip slot in pixels,
 # keyed by aspect ratio. Values are interpreted in the upscaled debug ROI space.
-# `PIP_SLOT_GAP_PX_BY_ASPECT` is the inter-slot spacing (bloom exclusion)
+# `PIP_SLOT_GAP_PX_BY_ASPECT_ALLY` is the inter-slot spacing (bloom exclusion)
 # in pixels, keyed by aspect ratio. Values are interpreted in the upscaled debug ROI space.
-# `PIP_SLOT_START_PX_BY_ASPECT` is the left-edge start for slot 1, per combat slot sigil,
+# `PIP_SLOT_START_PX_BY_ASPECT_ALLY` is the left-edge start for slot 1, per combat slot sigil,
 # in pixels in the upscaled debug ROI space.
-# `PIP_SLOT_TOP_CUT_PX_BY_ASPECT` and `PIP_SLOT_BOTTOM_CUT_PX_BY_ASPECT`
+# `PIP_SLOT_TOP_CUT_PX_BY_ASPECT_ALLY` and `PIP_SLOT_BOTTOM_CUT_PX_BY_ASPECT_ALLY`
 # trim each slot crop vertically in the upscaled debug ROI space.
-# `PIP_SLOT_PRESENCE_CONFIDENCE_THRESHOLD` is the minimum best-template match
-# score required before a slot is treated as containing a pip.
-PIP_SLOT_WIDTH_PX_DEFAULT: int = 15
-PIP_SLOT_WIDTH_PX_BY_ASPECT: Dict[str, int] = {
+# `PIP_SLOT_PRESENCE_CONFIDENCE_THRESHOLD_ALLY` is the minimum best-template match
+# score required before an ally slot is treated as containing a pip.
+PIP_SLOT_WIDTH_PX_ALLY_DEFAULT: int = 15
+PIP_SLOT_WIDTH_PX_BY_ASPECT_ALLY: Dict[str, int] = {
     "4:3": 40,
     "16:9": 37, # SLOT WIDTH
     "43:18": 31,
 }
-PIP_SLOT_GAP_PX_DEFAULT: int = 0
-PIP_SLOT_GAP_PX_BY_ASPECT: Dict[str, int] = {
+PIP_SLOT_WIDTH_PX_ENEMY_DEFAULT: int = 15
+PIP_SLOT_WIDTH_PX_BY_ASPECT_ENEMY: Dict[str, int] = {
+    "4:3": 40,
+    "16:9": 37,
+    "43:18": 31,
+}
+PIP_SLOT_GAP_PX_ALLY_DEFAULT: int = 0
+PIP_SLOT_GAP_PX_BY_ASPECT_ALLY: Dict[str, int] = {
     "4:3": 33,
     "16:9": 38, # SLOT GAP
     "43:18": 25,
 }
-PIP_SLOT_START_PX_DEFAULT: int = 0
-PIP_SLOT_TOP_CUT_PX_DEFAULT: int = 0
-PIP_SLOT_TOP_CUT_PX_BY_ASPECT: Dict[str, int] = {
+PIP_SLOT_GAP_PX_ENEMY_DEFAULT: int = 0
+PIP_SLOT_GAP_PX_BY_ASPECT_ENEMY: Dict[str, int] = {
+    "4:3": 33,
+    "16:9": 38,
+    "43:18": 25,
+}
+PIP_SLOT_START_PX_ALLY_DEFAULT: int = 0
+PIP_SLOT_START_PX_ENEMY_DEFAULT: int = 0
+PIP_SLOT_TOP_CUT_PX_ALLY_DEFAULT: int = 0
+PIP_SLOT_TOP_CUT_PX_BY_ASPECT_ALLY: Dict[str, int] = {
     "4:3": 13,
     "16:9": 12, # TOP CUT
     "43:18": 10,
 }
-PIP_SLOT_BOTTOM_CUT_PX_DEFAULT: int = 0
-PIP_SLOT_BOTTOM_CUT_PX_BY_ASPECT: Dict[str, int] = {
+PIP_SLOT_TOP_CUT_PX_ENEMY_DEFAULT: int = 0
+PIP_SLOT_TOP_CUT_PX_BY_ASPECT_ENEMY: Dict[str, int] = {
+    "4:3": 0,
+    "16:9": 0,
+    "43:18": 0,
+}
+PIP_SLOT_BOTTOM_CUT_PX_ALLY_DEFAULT: int = 0
+PIP_SLOT_BOTTOM_CUT_PX_BY_ASPECT_ALLY: Dict[str, int] = {
     "4:3": 22,
     "16:9": 18, # BOTTOM CUT
     "43:18": 18,
 }
-PIP_SLOT_PRESENCE_CONFIDENCE_THRESHOLD: float = 0.70
+PIP_SLOT_BOTTOM_CUT_PX_ENEMY_DEFAULT: int = 0
+PIP_SLOT_BOTTOM_CUT_PX_BY_ASPECT_ENEMY: Dict[str, int] = {
+    "4:3": 0,
+    "16:9": 0,
+    "43:18": 0,
+}
+PIP_SLOT_PRESENCE_CONFIDENCE_THRESHOLD_ALLY: float = 0.70
+PIP_SLOT_PRESENCE_CONFIDENCE_THRESHOLD_ENEMY: float = 0.70
 PIP_SLOT_COUNT: int = 7
-PIP_SLOT_START_PX_BY_ASPECT: Dict[str, Dict[str, int]] = {
+PIP_SLOT_START_PX_BY_ASPECT_ALLY: Dict[str, Dict[str, int]] = {
     "4:3": {
         "dagger": 45,
         "key": 45,
@@ -193,6 +223,38 @@ PIP_SLOT_START_PX_BY_ASPECT: Dict[str, Dict[str, int]] = {
         "eye": 37,
         "star": 37,
         "moon": 37,
+    },
+}
+PIP_SLOT_START_PX_BY_ASPECT_ENEMY: Dict[str, Dict[str, int]] = {
+    "4:3": {
+        "dagger": 40,
+        "key": 40,
+        "ruby": 40,
+        "spiral": 40,
+        "sun": 40,
+        "eye": 40,
+        "star": 40,
+        "moon": 40,
+    },
+    "16:9": {
+        "dagger": 45,
+        "key": 45,
+        "ruby": 45,
+        "spiral": 45,
+        "sun": 45,
+        "eye": 45,
+        "star": 45,
+        "moon": 45,
+    },
+    "43:18": {
+        "dagger": 31,
+        "key": 31,
+        "ruby": 31,
+        "spiral": 31,
+        "sun": 31,
+        "eye": 31,
+        "star": 31,
+        "moon": 31,
     },
 }
 

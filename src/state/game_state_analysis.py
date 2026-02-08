@@ -26,6 +26,7 @@ from config.wizmatic_config import (
     PLAYER_WIZARD_UNKNOWN_RESCAN_S,
     PLAYER_WIZARD_SLOT_CONFIRM_ROUNDS,
     PLAYER_WIZARD_IDLE_RESCAN_S,
+    COMBAT_MODE,
 )
 
 
@@ -66,14 +67,21 @@ STATE_CARD_SELECT = "card_select"
 STATE_ROUND_ANIMATION = "round_animation"
 BATTLE_STATES = {STATE_BATTLE, STATE_CARD_SELECT, STATE_ROUND_ANIMATION}
 
-BUTTON_ORDER = ["crownsShop", "upgradeNow", "friends", "social", "spellBook", "pass", "flee"]
-BUTTON_ALL = ["pass", "flee", "crownsShop", "upgradeNow", "friends", "social", "spellBook"]
+_PVP_MODE = str(COMBAT_MODE).strip().lower() == "pvp"
+_RETREAT_STATE_KEY = "concede" if _PVP_MODE else "flee"
+BUTTON_ORDER = ["crownsShop", "upgradeNow", "friends", "social", "spellBook", "pass", _RETREAT_STATE_KEY]
+BUTTON_ALL = ["pass", _RETREAT_STATE_KEY, "crownsShop", "upgradeNow", "friends", "social", "spellBook"]
 BUTTON_IDLE_TRUE = ["crownsShop", "upgradeNow", "friends", "social", "spellBook"]
-BUTTON_BATTLE_TRUE = ["crownsShop", "friends"]
-BUTTON_BATTLE_FALSE = ["upgradeNow", "social", "spellBook"]
-BUTTON_CARD_TRUE = ["crownsShop", "friends", "pass", "flee"]
-BUTTON_CARD_FALSE = ["upgradeNow", "social", "spellBook"]
-BUTTON_ROUND_FALSE = ["crownsShop", "upgradeNow", "social", "spellBook", "pass", "flee"]
+BUTTON_BATTLE_TRUE = ["crownsShop", "friends", "social"] if _PVP_MODE else ["crownsShop", "friends"]
+BUTTON_BATTLE_FALSE = ["upgradeNow", "spellBook"] if _PVP_MODE else ["upgradeNow", "social", "spellBook"]
+BUTTON_CARD_TRUE = ["crownsShop", "friends", "pass", _RETREAT_STATE_KEY]
+BUTTON_CARD_FALSE = ["upgradeNow", "spellBook"] if _PVP_MODE else ["upgradeNow", "social", "spellBook"]
+BUTTON_ROUND_FALSE = (
+    ["crownsShop", "upgradeNow", "spellBook", "pass", _RETREAT_STATE_KEY]
+    if _PVP_MODE
+    else ["crownsShop", "upgradeNow", "social", "spellBook", "pass", _RETREAT_STATE_KEY]
+)
+_RETREAT_BUTTON_LABEL = "concede" if _PVP_MODE else "flee"
 
 
 def _aspect_bucket(aspect: float) -> str:
@@ -114,15 +122,15 @@ def _resolve_game_state(prev_state: str, button_states: Optional[Dict[str, bool]
     battle_context = prev_in_battle or battle_base_hit
 
     pass_hit = button_states.get("pass", False)
-    flee_hit = button_states.get("flee", False)
-    pass_flee_both_false = (not pass_hit) and (not flee_hit)
+    retreat_hit = button_states.get(_RETREAT_STATE_KEY, False)
+    pass_retreat_both_false = (not pass_hit) and (not retreat_hit)
 
     card_select_hit = (
         battle_context
         and _all_false(button_states, BUTTON_CARD_FALSE)
         and (
             _count_hits(button_states, BUTTON_CARD_TRUE) >= 3
-            or (prev_state == STATE_CARD_SELECT and not pass_flee_both_false)
+            or (prev_state == STATE_CARD_SELECT and not pass_retreat_both_false)
         )
     )
     round_animation_hit = battle_context and _all_false(button_states, BUTTON_ROUND_FALSE)
@@ -204,20 +212,32 @@ def analyze_game_state(
         button_states = {}
         base_dir = BUTTON_ROI_CFG.templates_base_dir
         threshold = BUTTON_ROI_CFG.threshold
+        retreat_roi = button_profile.flee_rel_roi
+        if _PVP_MODE and button_profile.concede_rel_roi is not None:
+            retreat_roi = button_profile.concede_rel_roi
         button_rois = {
             "pass": button_profile.pass_rel_roi,
-            "flee": button_profile.flee_rel_roi,
+            _RETREAT_STATE_KEY: retreat_roi,
             "crownsShop": button_profile.crowns_shop_rel_roi,
             "upgradeNow": button_profile.upgrade_now_rel_roi,
             "friends": button_profile.friends_rel_roi,
             "social": button_profile.social_rel_roi,
             "spellBook": button_profile.spell_book_rel_roi,
         }
+        button_templates = {
+            "pass": "pass",
+            _RETREAT_STATE_KEY: _RETREAT_STATE_KEY,
+            "crownsShop": "crownsShop",
+            "upgradeNow": "upgradeNow",
+            "friends": "friends",
+            "social": "social",
+            "spellBook": "spellBook",
+        }
         for name, rel_roi in button_rois.items():
             try:
                 hit = detect_button(
                     analysis,
-                    name,
+                    button_templates.get(name, name),
                     templates_base_dir=Path(base_dir),
                     rel_roi=rel_roi,
                     threshold=threshold,
@@ -225,8 +245,12 @@ def analyze_game_state(
             except Exception:
                 hit = False
             button_states[name] = hit
+        # Compatibility aliases for callers that still inspect "flee"/"concede".
+        retreat_hit = button_states.get(_RETREAT_STATE_KEY, False)
+        button_states["flee"] = retreat_hit
+        button_states["concede"] = retreat_hit
         pass_found = button_states.get("pass", False)
-        flee_found = button_states.get("flee", False)
+        flee_found = retreat_hit
 
     resolved_state = _resolve_game_state(game_state.state, button_states)
     game_state.state = resolved_state
@@ -311,47 +335,16 @@ def analyze_game_state(
             cv2.putText(button_overlay, name, (tx, ty), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
             cv2.putText(button_overlay, name, (tx, ty), font, scale, color, thickness, cv2.LINE_AA)
 
+        retreat_roi = button_profile.flee_rel_roi
+        if _PVP_MODE and button_profile.concede_rel_roi is not None:
+            retreat_roi = button_profile.concede_rel_roi
         _draw_button_roi("pass", button_profile.pass_rel_roi, label_pos="below", hit=button_states.get("pass", False))
-        _draw_button_roi("flee", button_profile.flee_rel_roi, label_pos="below", hit=button_states.get("flee", False))
+        _draw_button_roi(_RETREAT_BUTTON_LABEL, retreat_roi, label_pos="below", hit=button_states.get(_RETREAT_STATE_KEY, False))
         _draw_button_roi("crownsShop", button_profile.crowns_shop_rel_roi, label_pos="below", hit=button_states.get("crownsShop", False))
         _draw_button_roi("upgradeNow", button_profile.upgrade_now_rel_roi, label_pos="right", hit=button_states.get("upgradeNow", False))
         _draw_button_roi("friends", button_profile.friends_rel_roi, label_pos="left", hit=button_states.get("friends", False))
         _draw_button_roi("social", button_profile.social_rel_roi, label_pos="left", hit=button_states.get("social", False))
         _draw_button_roi("spellBook", button_profile.spell_book_rel_roi, label_pos="top", hit=button_states.get("spellBook", False))
-        if button_overlay is not None:
-            h, w = button_overlay.shape[:2]
-            items = []
-            for key in BUTTON_ORDER:
-                hit = button_states.get(key, False)
-                if hit:
-                    items.append((key, (0, 255, 0)))
-            if items:
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.45
-                thickness = 1
-                pad = 6
-                line_h = 16
-                max_width = 0
-                for label, _ in items:
-                    (tw, _), _ = cv2.getTextSize(label, font, font_scale, thickness)
-                    if tw > max_width:
-                        max_width = tw
-                box_w = max_width + pad * 2
-                box_h = line_h * len(items) + pad
-                x = max(8, w - box_w - 8)
-                y = int((h - box_h) * 0.5) + line_h - 2
-                y = max(line_h, min(h - 2, y))
-                draw_status_list(
-                    button_overlay,
-                    items,
-                    x=x,
-                    y=y,
-                    line_h=line_h,
-                    font_scale=font_scale,
-                    thickness=thickness,
-                    pad=pad,
-                    copy=False,
-                )
 
     if in_card_select:
         if (not was_in_card_select) and (debug_dump_ocr or debug_dump_health_roi):

@@ -31,6 +31,7 @@ from config.wizmatic_config import (
     DEBUG_PRINT_NAME_OCR,
     DEBUG_PRINT_STATE_CHANGES,
     OCR_BACKEND,
+    COMBAT_MODE,
     MASTER_OVERLAY_SHOW_PARTICIPANTS,
     MASTER_OVERLAY_SHOW_PARTICIPANT_LEGEND,
     MASTER_OVERLAY_SHOW_PARTICIPANT_DETAILS,
@@ -42,6 +43,9 @@ from config.wizmatic_config import (
 from config.participants_config import PARTICIPANTS_CFG
 from state.initiative import render_initiative_boxes, render_initiative_overlay
 from state.participants import render_participants_overlay, render_player_wizard_overlay, pop_health_ocr_logs
+_PVP_MODE = str(COMBAT_MODE).strip().lower() == "pvp"
+_RETREAT_STATE_KEY = "concede" if _PVP_MODE else "flee"
+_RETREAT_BUTTON_LABEL = "concede" if _PVP_MODE else "flee"
 
 def main():
     if OCR_BACKEND == "easyocr":
@@ -63,6 +67,7 @@ def main():
     pending_task = None
     latest_packet = None
     latest_button_states = None
+    latest_button_overlay = None
     task_lock = threading.Lock()
     result_lock = threading.Lock()
     task_event = threading.Event()
@@ -125,12 +130,12 @@ def main():
         gold = (0, 215, 255)
         green = (0, 255, 0)
 
-        order = ["crownsShop", "upgradeNow", "friends", "social", "spellBook", "pass", "flee"]
+        order = ["crownsShop", "upgradeNow", "friends", "social", "spellBook", "pass", _RETREAT_STATE_KEY]
         items = []
         if show_buttons and button_states:
             for key in order:
                 if button_states.get(key, False):
-                    items.append(key)
+                    items.append(_RETREAT_BUTTON_LABEL if key == _RETREAT_STATE_KEY else key)
 
         (state_w, state_h), _ = cv2.getTextSize(label, font, state_scale, state_thickness)
         max_width = state_w
@@ -295,6 +300,8 @@ def main():
                 game_state = result.game_state
                 if result.button_states is not None:
                     latest_button_states = result.button_states
+                if result.button_overlay is not None:
+                    latest_button_overlay = result.button_overlay
                 state_current = game_state.state
                 in_card_select = game_state.battle.in_card_select
 
@@ -385,7 +392,10 @@ def main():
                             ),
                         )
                     if SHOW_BUTTON_OVERLAY:
-                        button_vis = render_base.copy()
+                        if latest_button_overlay is not None:
+                            button_vis = latest_button_overlay.copy()
+                        else:
+                            button_vis = render_base.copy()
                         _draw_state_and_buttons(
                             button_vis,
                             _format_state_label(state_current),

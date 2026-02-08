@@ -98,15 +98,26 @@ class PipDetectConfig:
     slot_debug_upscale: int = 3
     slot_width_px: int = 15
     slot_width_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_width_px_enemy: Optional[int] = None
+    slot_width_px_by_aspect_enemy: Dict[str, int] = field(default_factory=dict)
     slot_gap_px: int = 0
     slot_gap_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_gap_px_enemy: Optional[int] = None
+    slot_gap_px_by_aspect_enemy: Dict[str, int] = field(default_factory=dict)
     slot_start_px: int = 0
     slot_start_px_by_aspect: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    slot_start_px_enemy: Optional[int] = None
+    slot_start_px_by_aspect_enemy: Dict[str, Dict[str, int]] = field(default_factory=dict)
     slot_top_cut_px: int = 0
     slot_top_cut_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_top_cut_px_enemy: Optional[int] = None
+    slot_top_cut_px_by_aspect_enemy: Dict[str, int] = field(default_factory=dict)
     slot_bottom_cut_px: int = 0
     slot_bottom_cut_px_by_aspect: Dict[str, int] = field(default_factory=dict)
+    slot_bottom_cut_px_enemy: Optional[int] = None
+    slot_bottom_cut_px_by_aspect_enemy: Dict[str, int] = field(default_factory=dict)
     slot_presence_confidence_threshold: float = 0.7
+    slot_presence_confidence_threshold_enemy: Optional[float] = None
     slot_count: int = 7
 
 
@@ -134,7 +145,7 @@ class OCRConfig:
     invert: bool = False
     tesseract_cmd: Optional[str] = None
     user_words_path: Optional[str] = None
-    name_resolution_mode: str = "pve"  # "pve" or "pvp"
+    combat_mode: str = "pve"  # "pve" or "pvp"
     wordlist_wizards_path: Optional[str] = None
     wordlist_monsters_path: Optional[str] = None
     wordlist_minions_path: Optional[str] = None
@@ -628,16 +639,24 @@ def _pip_slot_name(side: str, index: int) -> str:
     return f"{side}_{index}"
 
 
-def _pip_slot_start_px(cfg: PipDetectConfig, aspect_key: str, slot_name: str) -> int:
-    by_aspect = cfg.slot_start_px_by_aspect or {}
+def _pip_slot_start_px(cfg: PipDetectConfig, aspect_key: str, slot_name: str, side: str) -> int:
+    use_enemy = (side or "").lower() == "enemy"
+    by_aspect = cfg.slot_start_px_by_aspect_enemy if use_enemy else cfg.slot_start_px_by_aspect
+    if not by_aspect:
+        by_aspect = cfg.slot_start_px_by_aspect
     aspect_map = by_aspect.get(aspect_key) or by_aspect.get("16:9") or {}
     try:
         start = aspect_map.get(slot_name)
         if start is None:
+            start = cfg.slot_start_px_enemy if use_enemy else cfg.slot_start_px
+        if start is None:
             start = cfg.slot_start_px
         return max(0, int(round(float(start))))
     except Exception:
-        return max(0, int(round(float(cfg.slot_start_px))))
+        fallback = cfg.slot_start_px_enemy if use_enemy else cfg.slot_start_px
+        if fallback is None:
+            fallback = cfg.slot_start_px
+        return max(0, int(round(float(fallback))))
 
 
 def _pip_aspect_dir_name(aspect_key: str) -> str:
@@ -659,56 +678,95 @@ def _pip_aspect_dir_name(aspect_key: str) -> str:
     return out or "unknown"
 
 
-def _pip_slot_width_px(cfg: PipDetectConfig, aspect_key: str) -> int:
-    by_aspect = cfg.slot_width_px_by_aspect or {}
+def _pip_slot_width_px(cfg: PipDetectConfig, aspect_key: str, side: str) -> int:
+    use_enemy = (side or "").lower() == "enemy"
+    by_aspect = cfg.slot_width_px_by_aspect_enemy if use_enemy else cfg.slot_width_px_by_aspect
+    if not by_aspect:
+        by_aspect = cfg.slot_width_px_by_aspect
     try:
         width = by_aspect.get(aspect_key)
         if width is None:
             width = by_aspect.get("16:9")
         if width is None:
+            width = cfg.slot_width_px_enemy if use_enemy else cfg.slot_width_px
+        if width is None:
             width = cfg.slot_width_px
         return max(1, int(round(float(width))))
     except Exception:
-        return max(1, int(round(float(cfg.slot_width_px))))
+        fallback = cfg.slot_width_px_enemy if use_enemy else cfg.slot_width_px
+        if fallback is None:
+            fallback = cfg.slot_width_px
+        return max(1, int(round(float(fallback))))
 
 
-def _pip_slot_gap_px(cfg: PipDetectConfig, aspect_key: str) -> int:
-    by_aspect = cfg.slot_gap_px_by_aspect or {}
+def _pip_slot_gap_px(cfg: PipDetectConfig, aspect_key: str, side: str) -> int:
+    use_enemy = (side or "").lower() == "enemy"
+    by_aspect = cfg.slot_gap_px_by_aspect_enemy if use_enemy else cfg.slot_gap_px_by_aspect
+    if not by_aspect:
+        by_aspect = cfg.slot_gap_px_by_aspect
     try:
         gap = by_aspect.get(aspect_key)
         if gap is None:
             gap = by_aspect.get("16:9")
         if gap is None:
+            gap = cfg.slot_gap_px_enemy if use_enemy else cfg.slot_gap_px
+        if gap is None:
             gap = cfg.slot_gap_px
         return max(0, int(round(float(gap))))
     except Exception:
-        return max(0, int(round(float(cfg.slot_gap_px))))
+        fallback = cfg.slot_gap_px_enemy if use_enemy else cfg.slot_gap_px
+        if fallback is None:
+            fallback = cfg.slot_gap_px
+        return max(0, int(round(float(fallback))))
 
 
-def _pip_slot_top_cut_px(cfg: PipDetectConfig, aspect_key: str) -> int:
-    by_aspect = cfg.slot_top_cut_px_by_aspect or {}
+def _pip_slot_top_cut_px(cfg: PipDetectConfig, aspect_key: str, side: str) -> int:
+    use_enemy = (side or "").lower() == "enemy"
+    by_aspect = cfg.slot_top_cut_px_by_aspect_enemy if use_enemy else cfg.slot_top_cut_px_by_aspect
+    if not by_aspect:
+        by_aspect = cfg.slot_top_cut_px_by_aspect
     try:
         top = by_aspect.get(aspect_key)
         if top is None:
             top = by_aspect.get("16:9")
         if top is None:
+            top = cfg.slot_top_cut_px_enemy if use_enemy else cfg.slot_top_cut_px
+        if top is None:
             top = cfg.slot_top_cut_px
         return max(0, int(round(float(top))))
     except Exception:
-        return max(0, int(round(float(cfg.slot_top_cut_px))))
+        fallback = cfg.slot_top_cut_px_enemy if use_enemy else cfg.slot_top_cut_px
+        if fallback is None:
+            fallback = cfg.slot_top_cut_px
+        return max(0, int(round(float(fallback))))
 
 
-def _pip_slot_bottom_cut_px(cfg: PipDetectConfig, aspect_key: str) -> int:
-    by_aspect = cfg.slot_bottom_cut_px_by_aspect or {}
+def _pip_slot_bottom_cut_px(cfg: PipDetectConfig, aspect_key: str, side: str) -> int:
+    use_enemy = (side or "").lower() == "enemy"
+    by_aspect = cfg.slot_bottom_cut_px_by_aspect_enemy if use_enemy else cfg.slot_bottom_cut_px_by_aspect
+    if not by_aspect:
+        by_aspect = cfg.slot_bottom_cut_px_by_aspect
     try:
         bot = by_aspect.get(aspect_key)
         if bot is None:
             bot = by_aspect.get("16:9")
         if bot is None:
+            bot = cfg.slot_bottom_cut_px_enemy if use_enemy else cfg.slot_bottom_cut_px
+        if bot is None:
             bot = cfg.slot_bottom_cut_px
         return max(0, int(round(float(bot))))
     except Exception:
-        return max(0, int(round(float(cfg.slot_bottom_cut_px))))
+        fallback = cfg.slot_bottom_cut_px_enemy if use_enemy else cfg.slot_bottom_cut_px
+        if fallback is None:
+            fallback = cfg.slot_bottom_cut_px
+        return max(0, int(round(float(fallback))))
+
+
+def _pip_slot_presence_threshold(cfg: PipDetectConfig, side: str) -> float:
+    use_enemy = (side or "").lower() == "enemy"
+    if use_enemy and cfg.slot_presence_confidence_threshold_enemy is not None:
+        return float(cfg.slot_presence_confidence_threshold_enemy)
+    return float(cfg.slot_presence_confidence_threshold)
 
 
 def _dump_pips_roi_debug(
@@ -743,12 +801,12 @@ def _dump_pips_roi_debug(
         if h <= 0 or w <= 0:
             return
         slot_count = max(1, int(cfg.slot_count))
-        start_x = _pip_slot_start_px(cfg, aspect_key, slot_name)
-        slot_w = _pip_slot_width_px(cfg, aspect_key)
-        slot_gap = _pip_slot_gap_px(cfg, aspect_key)
+        start_x = _pip_slot_start_px(cfg, aspect_key, slot_name, side)
+        slot_w = _pip_slot_width_px(cfg, aspect_key, side)
+        slot_gap = _pip_slot_gap_px(cfg, aspect_key, side)
         slot_step = slot_w + slot_gap
-        top_cut = _pip_slot_top_cut_px(cfg, aspect_key)
-        bottom_cut = _pip_slot_bottom_cut_px(cfg, aspect_key)
+        top_cut = _pip_slot_top_cut_px(cfg, aspect_key, side)
+        bottom_cut = _pip_slot_bottom_cut_px(cfg, aspect_key, side)
         y1 = max(0, min(h - 1, top_cut))
         y2 = max(y1 + 1, min(h, h - bottom_cut))
 
@@ -1492,7 +1550,7 @@ def _load_wordlist(path: Optional[str]) -> Tuple[List[str], List[str]]:
 
 
 def _wordlist_path_for_side(cfg: OCRConfig, side: Optional[str]) -> Optional[str]:
-    mode = (cfg.name_resolution_mode or "pve").strip().lower()
+    mode = (cfg.combat_mode or "pve").strip().lower()
     if mode == "pvp":
         return cfg.wordlist_wizards_path or cfg.user_words_path
     if mode == "pve":
@@ -1511,7 +1569,7 @@ def _wordlist_cfg_for_side(cfg: OCRConfig, side: Optional[str]) -> OCRConfig:
 
 
 def _should_use_wizard_wordlist(cfg: OCRConfig, side: Optional[str]) -> bool:
-    mode = (cfg.name_resolution_mode or "pve").strip().lower()
+    mode = (cfg.combat_mode or "pve").strip().lower()
     if mode == "pvp":
         return True
     if mode == "pve":
@@ -2715,6 +2773,7 @@ def _pip_counts(
     cfg: PipDetectConfig,
     aspect_key: str,
     *,
+    side: str = "ally",
     slot_name: str = "sun",
 ) -> PipInventory:
     counts = PipInventory()
@@ -2736,12 +2795,12 @@ def _pip_counts(
         return counts
 
     slot_count = max(1, int(cfg.slot_count))
-    start_x = _pip_slot_start_px(cfg, aspect_key, slot_name)
-    slot_w = _pip_slot_width_px(cfg, aspect_key)
-    slot_gap = _pip_slot_gap_px(cfg, aspect_key)
+    start_x = _pip_slot_start_px(cfg, aspect_key, slot_name, side)
+    slot_w = _pip_slot_width_px(cfg, aspect_key, side)
+    slot_gap = _pip_slot_gap_px(cfg, aspect_key, side)
     slot_step = slot_w + slot_gap
-    top_cut = _pip_slot_top_cut_px(cfg, aspect_key)
-    bottom_cut = _pip_slot_bottom_cut_px(cfg, aspect_key)
+    top_cut = _pip_slot_top_cut_px(cfg, aspect_key, side)
+    bottom_cut = _pip_slot_bottom_cut_px(cfg, aspect_key, side)
     y1 = max(0, min(h - 1, top_cut))
     y2 = max(y1 + 1, min(h, h - bottom_cut))
 
@@ -2768,7 +2827,7 @@ def _pip_counts(
 
         slot_gray = cv2.cvtColor(slot, cv2.COLOR_BGR2GRAY)
         best_match, best_score = _best_pip_template_match(slot_gray, templates_by_token)
-        if best_score < float(cfg.slot_presence_confidence_threshold):
+        if best_score < _pip_slot_presence_threshold(cfg, side):
             # Treat as empty when template confidence is below configured threshold.
             continue
         if best_match == "regular":
@@ -3136,6 +3195,7 @@ def _extract_participant(
             pips_crop,
             cfg.pip,
             aspect_key,
+            side=side,
             slot_name=_pip_slot_name(side, index),
         )
 
