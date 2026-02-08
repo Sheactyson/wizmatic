@@ -8,9 +8,10 @@ import numpy as np
 
 from utils.button_detect import detect_button
 from utils.roi import crop_relative, draw_status_list
-from config.roi_config import BUTTON_ROI_CFG, PLAYER_HUD_PROFILES
+from config.roi_config import BUTTON_ROI_CFG, PLAYER_HUD_PROFILES, CARD_COUNT_CFG
 from state.game_state import GameState, BattleState
 from state.initiative import InitiativeConfig, extract_initiative, render_initiative_overlay
+from state.card_count import extract_player_hand_state
 from state.participants import (
     ParticipantsConfig,
     extract_participants,
@@ -26,6 +27,7 @@ from config.wizmatic_config import (
     PLAYER_WIZARD_UNKNOWN_RESCAN_S,
     PLAYER_WIZARD_SLOT_CONFIRM_ROUNDS,
     PLAYER_WIZARD_IDLE_RESCAN_S,
+    CARD_COUNT_REFRESH_S,
     COMBAT_MODE,
 )
 
@@ -182,6 +184,7 @@ def analyze_game_state(
     debug_dump_sigil_roi: bool = False,
     debug_dump_school_roi: bool = False,
     debug_dump_player_wizard_roi: bool = False,
+    debug_dump_player_hand_roi: bool = False,
     debug_dump_pip_roi: bool = False,
     debug_print_health_ocr: bool = True,
     debug_dump_ocr_id: Optional[str] = None,
@@ -487,7 +490,7 @@ def analyze_game_state(
             if should_scan_player:
                 scan_health = (not previous_player.slot_locked)
                 scan_mana = entered_card_select
-                game_state.battle.player_wizard = extract_player_wizard_state(
+                next_player = extract_player_wizard_state(
                     analysis,
                     game_state.battle.participants,
                     participants_cfg.ocr,
@@ -501,6 +504,25 @@ def analyze_game_state(
                     scan_mana=scan_mana,
                     scan_energy=False,
                 )
+                game_state.battle.player_wizard = next_player
+        previous_hand = game_state.battle.player_hand
+        should_scan_hand = entered_card_select
+        if not should_scan_hand:
+            retry_interval_s = max(0.0, CARD_COUNT_REFRESH_S)
+            should_scan_hand = (
+                previous_hand.timestamp is not None
+                and previous_hand.cards_in_hand is None
+                and retry_interval_s > 0.0
+                and (game_state.updated_at - previous_hand.timestamp) >= retry_interval_s
+            )
+        if should_scan_hand:
+            game_state.battle.player_hand = extract_player_hand_state(
+                analysis,
+                CARD_COUNT_CFG,
+                aspect_key=aspect_key,
+                timestamp=game_state.updated_at,
+                debug_dump_roi=debug_dump_player_hand_roi,
+            )
 
     if render_player_wizard and analysis is not None and (in_battle or (resolved_state == STATE_IDLE)):
         player_wizard_overlay = render_player_wizard_overlay(

@@ -74,6 +74,7 @@ class ParticipantState:
     school: Optional[str] = None
     school_score: Optional[float] = None
     pips: PipInventory = field(default_factory=PipInventory)
+    slot_active: bool = False
     occupied: bool = False
     empty_reason: Optional[str] = None
     name_roi: Optional[Tuple[float, float, float, float]] = None
@@ -122,6 +123,18 @@ class PlayerWizardState:
 
 
 @dataclass
+class PlayerHandState:
+    detected: bool = False
+    cards_in_hand: Optional[int] = None
+    slot_score: float = 0.0
+    slot_center_px: Optional[Tuple[int, int]] = None
+    slot_center_rel: Optional[Tuple[float, float]] = None
+    slot_roi: Optional[Tuple[float, float, float, float]] = None
+    profile: Optional[str] = None
+    timestamp: Optional[float] = None
+
+
+@dataclass
 class BattleState:
     active: bool = False
     in_card_select: bool = False
@@ -131,6 +144,7 @@ class BattleState:
     turn_order: TurnOrderState = field(default_factory=TurnOrderState)
     participants: ParticipantsState = field(default_factory=ParticipantsState)
     player_wizard: PlayerWizardState = field(default_factory=PlayerWizardState)
+    player_hand: PlayerHandState = field(default_factory=PlayerHandState)
 
 
 @dataclass

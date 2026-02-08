@@ -35,6 +35,10 @@ _WORDLIST_NORM_MAP_CACHE: Dict[str, Dict[str, str]] = {}
 _EASYOCR_WARNED = False
 _HEALTH_OCR_LOG_QUEUE: List[str] = []
 _HEALTH_OCR_LOG_LOCK = threading.Lock()
+_NAME_OCR_LOG_QUEUE: List[str] = []
+_NAME_OCR_LOG_LOCK = threading.Lock()
+_SLOT_ACTIVITY_LOG_QUEUE: List[str] = []
+_SLOT_ACTIVITY_LOG_LOCK = threading.Lock()
 
 _WORDLIST_PREFIX_MAX_LEN = 4
 _WORDLIST_MULTI_SEP = "|"
@@ -52,6 +56,34 @@ def pop_health_ocr_logs() -> List[str]:
 def _push_health_ocr_log(line: str) -> None:
     with _HEALTH_OCR_LOG_LOCK:
         _HEALTH_OCR_LOG_QUEUE.append(line)
+
+
+def pop_name_ocr_logs() -> List[str]:
+    with _NAME_OCR_LOG_LOCK:
+        if not _NAME_OCR_LOG_QUEUE:
+            return []
+        logs = list(_NAME_OCR_LOG_QUEUE)
+        _NAME_OCR_LOG_QUEUE.clear()
+    return logs
+
+
+def _push_name_ocr_log(line: str) -> None:
+    with _NAME_OCR_LOG_LOCK:
+        _NAME_OCR_LOG_QUEUE.append(line)
+
+
+def pop_slot_activity_logs() -> List[str]:
+    with _SLOT_ACTIVITY_LOG_LOCK:
+        if not _SLOT_ACTIVITY_LOG_QUEUE:
+            return []
+        logs = list(_SLOT_ACTIVITY_LOG_QUEUE)
+        _SLOT_ACTIVITY_LOG_QUEUE.clear()
+    return logs
+
+
+def _push_slot_activity_log(line: str) -> None:
+    with _SLOT_ACTIVITY_LOG_LOCK:
+        _SLOT_ACTIVITY_LOG_QUEUE.append(line)
 
 
 @dataclass(frozen=True)
@@ -2495,6 +2527,24 @@ def _log_health_ocr(
     _push_health_ocr_log(f'{label}: "{raw}" --> ({prev_cur} - {abs(delta)} = {cur})')
 
 
+def _log_name_ocr(participant: ParticipantState) -> None:
+    sigil = ((participant.sigil or _sigil_name(participant)).strip() or "unknown").title()
+    raw = (participant.name_raw or "unknown").strip() or "unknown"
+    final = (participant.name or "unknown").strip() or "unknown"
+    if participant.name_time_ms is not None:
+        if participant.name_time_parts:
+            cap_ms, prep_ms, ocr_ms, res_ms = participant.name_time_parts
+            _push_name_ocr_log(
+                f"[ocr:name] {sigil}: {raw} -> {final} "
+                f"({participant.name_time_ms:.1f}ms | capture {cap_ms:.1f}ms "
+                f"prep {prep_ms:.1f}ms ocr {ocr_ms:.1f}ms resolve {res_ms:.1f}ms)"
+            )
+            return
+        _push_name_ocr_log(f"[ocr:name] {sigil}: {raw} -> {final} ({participant.name_time_ms:.1f}ms)")
+        return
+    _push_name_ocr_log(f"[ocr:name] {sigil}: {raw} -> {final}")
+
+
 def _count_blobs(mask: np.ndarray, min_area: int, max_area: int) -> int:
     if mask.size == 0:
         return 0
@@ -2926,6 +2976,7 @@ def _extract_participant(
     sigil_override: Optional[str] = None,
     sigil_score_override: Optional[float] = None,
     sigil_checked: bool = False,
+    previous_slot: Optional[ParticipantState] = None,
 ) -> ParticipantState:
     slot_dump_id = f"{debug_dump_id}_{side}_{index}" if debug_dump_id else None
     layout = cfg.layout
@@ -2951,6 +3002,35 @@ def _extract_participant(
         _dump_participant_roi(sigil_crop, kind="sigil", side=side, index=index, enabled=debug_dump_sigil_roi)
         sigil_match, sigil_score = _detect_sigil(sigil_crop, cfg.sigil, aspect_key)
     if sigil_match is None:
+        if previous_slot is not None:
+            carried_pips = previous_slot.pips if previous_slot.pips is not None else PipInventory()
+            return ParticipantState(
+                side=side,
+                index=index,
+                rel_roi=box_roi,
+                sigil=previous_slot.sigil,
+                sigil_score=previous_slot.sigil_score,
+                name=previous_slot.name,
+                name_raw=previous_slot.name_raw,
+                name_time_ms=previous_slot.name_time_ms,
+                name_time_parts=previous_slot.name_time_parts,
+                name_roi_hash=previous_slot.name_roi_hash,
+                name_ocr=previous_slot.name_ocr,
+                details_checked_at=previous_slot.details_checked_at,
+                health_current=previous_slot.health_current,
+                health_max=previous_slot.health_max,
+                school=previous_slot.school,
+                school_score=previous_slot.school_score,
+                pips=carried_pips,
+                slot_active=False,
+                occupied=False,
+                empty_reason="sigil inactive",
+                name_roi=name_roi,
+                health_roi=health_roi,
+                pips_roi=pips_roi,
+                sigil_roi=sigil_roi,
+                school_roi=school_roi,
+            )
         return ParticipantState(
             side=side,
             index=index,
@@ -2969,8 +3049,9 @@ def _extract_participant(
             school=None,
             school_score=None,
             pips=PipInventory(),
+            slot_active=False,
             occupied=False,
-            empty_reason="sigil missing",
+            empty_reason="sigil inactive",
             name_roi=name_roi,
             health_roi=health_roi,
             pips_roi=pips_roi,
@@ -3217,6 +3298,7 @@ def _extract_participant(
         school=school_match,
         school_score=school_score,
         pips=pips,
+        slot_active=True,
         occupied=True,
         empty_reason=None,
         name_roi=name_roi,
@@ -3327,6 +3409,87 @@ def extract_participants(
             return True
         return prev.school_score >= cfg.school.template_threshold
 
+    def _norm_identity_text(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip().lower()
+        if (not cleaned) or cleaned == "unknown":
+            return None
+        return cleaned
+
+    def _identity_is_consistent(prev: Optional[ParticipantState], curr: ParticipantState) -> bool:
+        if prev is None:
+            return True
+
+        prev_name = _norm_identity_text(prev.name)
+        curr_name = _norm_identity_text(curr.name)
+        if prev_name is not None and curr_name is not None and prev_name != curr_name:
+            return False
+
+        prev_school = _norm_identity_text(prev.school)
+        curr_school = _norm_identity_text(curr.school)
+        if prev_school is not None and curr_school is not None and prev_school != curr_school:
+            return False
+
+        if prev.health_max is not None and curr.health_max is not None and prev.health_max != curr.health_max:
+            return False
+
+        return True
+
+    def _merge_reactivated_slot(prev: Optional[ParticipantState], curr: ParticipantState) -> ParticipantState:
+        if prev is None:
+            return curr
+        if prev.occupied or (not curr.occupied):
+            return curr
+        if not _identity_is_consistent(prev, curr):
+            return curr
+
+        merged_name = curr.name if _norm_identity_text(curr.name) is not None else prev.name
+        merged_name_raw = curr.name_raw if _norm_identity_text(curr.name_raw) is not None else prev.name_raw
+        merged_health_max = curr.health_max if curr.health_max is not None else prev.health_max
+        merged_school = curr.school if _norm_identity_text(curr.school) is not None else prev.school
+        merged_school_score = curr.school_score if merged_school == curr.school else prev.school_score
+        merged_name_hash = curr.name_roi_hash if curr.name_roi_hash is not None else prev.name_roi_hash
+
+        return replace(
+            curr,
+            name=merged_name,
+            name_raw=merged_name_raw,
+            health_max=merged_health_max,
+            school=merged_school,
+            school_score=merged_school_score,
+            name_roi_hash=merged_name_hash,
+        )
+
+    def _slot_identity_details(slot: ParticipantState) -> Tuple[str, str, str]:
+        name = (slot.name or "unknown").strip() or "unknown"
+        hp_max = "?" if slot.health_max is None else str(slot.health_max)
+        school = (slot.school or "unknown").strip() or "unknown"
+        return (name, hp_max, school)
+
+    def _slot_label(slot: ParticipantState) -> str:
+        sigil = (slot.sigil or _sigil_name(slot)).strip() or _sigil_name(slot)
+        return f"{slot.side.title()} {sigil.title()} (slot {slot.index})"
+
+    def _log_slot_transition(prev: Optional[ParticipantState], curr: ParticipantState) -> None:
+        if prev is None:
+            return
+        was_active = bool(prev.slot_active and prev.occupied)
+        now_active = bool(curr.slot_active and curr.occupied)
+        if was_active == now_active:
+            return
+        label = _slot_label(curr)
+        if was_active and (not now_active):
+            prev_name, prev_hp_max, prev_school = _slot_identity_details(prev)
+            _push_slot_activity_log(
+                f"[slot] LOST {label}: now inactive | name={prev_name} hp_max={prev_hp_max} school={prev_school}"
+            )
+            return
+        curr_name, curr_hp_max, curr_school = _slot_identity_details(curr)
+        _push_slot_activity_log(
+            f"[slot] REDISCOVERED {label}: now active | name={curr_name} hp_max={curr_hp_max} school={curr_school}"
+        )
+
     def _detail_needs(prev: Optional[ParticipantState], occupied_now: bool) -> Tuple[bool, bool, bool, bool, Optional[float]]:
         if not occupied_now:
             return (False, False, False, False, None)
@@ -3390,8 +3553,8 @@ def extract_participants(
                 _dump_participant_roi(sigil_crop, kind="sigil", side=side, index=i, enabled=debug_dump_sigil_roi)
                 sigil_match, sigil_score = _detect_sigil(sigil_crop, cfg.sigil, bucket)
             else:
-                sigil_match = prev.sigil if prev else None
-                sigil_score = prev.sigil_score if prev else None
+                sigil_match = prev.sigil if (prev and prev.slot_active and prev.occupied) else None
+                sigil_score = prev.sigil_score if (prev and prev.slot_active and prev.occupied) else None
             sigil_info[(side, i)] = (sigil_match, sigil_score, box_roi)
 
     if use_batch_easyocr:
@@ -3510,96 +3673,103 @@ def extract_participants(
         if lock_health_max and prev_ally is not None and prev_ally.health_max is not None:
             ally_health_max_override = prev_ally.health_max
 
-        enemies.append(
-            _extract_participant(
-                frame_bgr,
-                "enemy",
-                i,
-                enemy_roi,
-                cfg,
-                skip_name_ocr=skip_name_ocr or use_batch_easyocr or (not enemy_need_name),
-                name_override=(
-                    enemy_name_final if use_batch_easyocr else (prev_enemy.name if prev_enemy is not None else None)
-                ),
-                name_raw_override=(
-                    enemy_name_raw if use_batch_easyocr else (prev_enemy.name_raw if prev_enemy is not None else None)
-                ),
-                name_time_override=(enemy_name_time if use_batch_easyocr else None),
-                name_time_parts_override=(enemy_name_parts if use_batch_easyocr else None),
-                name_hash_override=enemy_name_hash,
-                name_prev_hash=(prev_enemy.name_roi_hash if prev_enemy is not None else None),
-                name_ocr_override=enemy_name_ocr,
-                skip_health_ocr=skip_health_ocr or (not enemy_need_health),
-                health_override=(
-                    (prev_enemy.health_current, prev_enemy.health_max) if prev_enemy is not None else None
-                ),
-                health_max_override=enemy_health_max_override,
-                skip_school_detect=(not enemy_need_school),
-                school_override=(prev_enemy.school if prev_enemy is not None else None),
-                school_score_override=(prev_enemy.school_score if prev_enemy is not None else None),
-                skip_pip_detect=(not enemy_need_pips),
-                pips_override=(prev_enemy.pips if prev_enemy is not None else None),
-                details_checked_at_override=(enemy_details_at if prev_enemy is not None else enemy_details_at),
-                occupied_override=(prev_enemy.occupied if prev_enemy is not None else None),
-                debug_dump=debug_dump,
-                debug_dump_health=debug_dump_health,
-                debug_dump_empty_names=debug_dump_empty_names,
-                debug_dump_sigil_roi=debug_dump_sigil_roi,
-                debug_dump_school_roi=debug_dump_school_roi,
-                debug_dump_pips=debug_dump_pips,
-                debug_print_health_ocr=debug_print_health_ocr,
-                debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
-                debug_dump_id=debug_dump_id,
-                debug_dump_limit=debug_dump_limit,
-                sigil_override=enemy_sigil,
-                sigil_score_override=enemy_sigil_score,
-                sigil_checked=True,
-            )
+        enemy_slot = _extract_participant(
+            frame_bgr,
+            "enemy",
+            i,
+            enemy_roi,
+            cfg,
+            skip_name_ocr=skip_name_ocr or use_batch_easyocr or (not enemy_need_name),
+            name_override=(
+                enemy_name_final if use_batch_easyocr else (prev_enemy.name if prev_enemy is not None else None)
+            ),
+            name_raw_override=(
+                enemy_name_raw if use_batch_easyocr else (prev_enemy.name_raw if prev_enemy is not None else None)
+            ),
+            name_time_override=(enemy_name_time if use_batch_easyocr else None),
+            name_time_parts_override=(enemy_name_parts if use_batch_easyocr else None),
+            name_hash_override=enemy_name_hash,
+            name_prev_hash=(prev_enemy.name_roi_hash if prev_enemy is not None else None),
+            name_ocr_override=enemy_name_ocr,
+            skip_health_ocr=skip_health_ocr or (not enemy_need_health),
+            health_override=((prev_enemy.health_current, prev_enemy.health_max) if prev_enemy is not None else None),
+            health_max_override=enemy_health_max_override,
+            skip_school_detect=(not enemy_need_school),
+            school_override=(prev_enemy.school if prev_enemy is not None else None),
+            school_score_override=(prev_enemy.school_score if prev_enemy is not None else None),
+            skip_pip_detect=(not enemy_need_pips),
+            pips_override=(prev_enemy.pips if prev_enemy is not None else None),
+            details_checked_at_override=(enemy_details_at if prev_enemy is not None else enemy_details_at),
+            occupied_override=(prev_enemy.occupied if prev_enemy is not None else None),
+            debug_dump=debug_dump,
+            debug_dump_health=debug_dump_health,
+            debug_dump_empty_names=debug_dump_empty_names,
+            debug_dump_sigil_roi=debug_dump_sigil_roi,
+            debug_dump_school_roi=debug_dump_school_roi,
+            debug_dump_pips=debug_dump_pips,
+            debug_print_health_ocr=debug_print_health_ocr,
+            debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
+            debug_dump_id=debug_dump_id,
+            debug_dump_limit=debug_dump_limit,
+            sigil_override=enemy_sigil,
+            sigil_score_override=enemy_sigil_score,
+            sigil_checked=True,
+            previous_slot=prev_enemy,
         )
-        allies.append(
-            _extract_participant(
-                frame_bgr,
-                "ally",
-                i,
-                ally_roi,
-                cfg,
-                skip_name_ocr=skip_name_ocr or use_batch_easyocr or (not ally_need_name),
-                name_override=(
-                    ally_name_final if use_batch_easyocr else (prev_ally.name if prev_ally is not None else None)
-                ),
-                name_raw_override=(
-                    ally_name_raw if use_batch_easyocr else (prev_ally.name_raw if prev_ally is not None else None)
-                ),
-                name_time_override=(ally_name_time if use_batch_easyocr else None),
-                name_time_parts_override=(ally_name_parts if use_batch_easyocr else None),
-                name_hash_override=ally_name_hash,
-                name_prev_hash=(prev_ally.name_roi_hash if prev_ally is not None else None),
-                name_ocr_override=ally_name_ocr,
-                skip_health_ocr=skip_health_ocr or (not ally_need_health),
-                health_override=((prev_ally.health_current, prev_ally.health_max) if prev_ally is not None else None),
-                health_max_override=ally_health_max_override,
-                skip_school_detect=(not ally_need_school),
-                school_override=(prev_ally.school if prev_ally is not None else None),
-                school_score_override=(prev_ally.school_score if prev_ally is not None else None),
-                skip_pip_detect=(not ally_need_pips),
-                pips_override=(prev_ally.pips if prev_ally is not None else None),
-                details_checked_at_override=(ally_details_at if prev_ally is not None else ally_details_at),
-                occupied_override=(prev_ally.occupied if prev_ally is not None else None),
-                debug_dump=debug_dump,
-                debug_dump_health=debug_dump_health,
-                debug_dump_empty_names=debug_dump_empty_names,
-                debug_dump_sigil_roi=debug_dump_sigil_roi,
-                debug_dump_school_roi=debug_dump_school_roi,
-                debug_dump_pips=debug_dump_pips,
-                debug_print_health_ocr=debug_print_health_ocr,
-                debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
-                debug_dump_id=debug_dump_id,
-                debug_dump_limit=debug_dump_limit,
-                sigil_override=ally_sigil,
-                sigil_score_override=ally_sigil_score,
-                sigil_checked=True,
-            )
+        enemy_slot_final = _merge_reactivated_slot(prev_enemy, enemy_slot)
+        enemies.append(enemy_slot_final)
+        _log_slot_transition(prev_enemy, enemy_slot_final)
+        if enemy_need_name and enemy_slot_final.slot_active and enemy_slot_final.occupied and enemy_slot_final.name_ocr:
+            _log_name_ocr(enemy_slot_final)
+
+        ally_slot = _extract_participant(
+            frame_bgr,
+            "ally",
+            i,
+            ally_roi,
+            cfg,
+            skip_name_ocr=skip_name_ocr or use_batch_easyocr or (not ally_need_name),
+            name_override=(
+                ally_name_final if use_batch_easyocr else (prev_ally.name if prev_ally is not None else None)
+            ),
+            name_raw_override=(
+                ally_name_raw if use_batch_easyocr else (prev_ally.name_raw if prev_ally is not None else None)
+            ),
+            name_time_override=(ally_name_time if use_batch_easyocr else None),
+            name_time_parts_override=(ally_name_parts if use_batch_easyocr else None),
+            name_hash_override=ally_name_hash,
+            name_prev_hash=(prev_ally.name_roi_hash if prev_ally is not None else None),
+            name_ocr_override=ally_name_ocr,
+            skip_health_ocr=skip_health_ocr or (not ally_need_health),
+            health_override=((prev_ally.health_current, prev_ally.health_max) if prev_ally is not None else None),
+            health_max_override=ally_health_max_override,
+            skip_school_detect=(not ally_need_school),
+            school_override=(prev_ally.school if prev_ally is not None else None),
+            school_score_override=(prev_ally.school_score if prev_ally is not None else None),
+            skip_pip_detect=(not ally_need_pips),
+            pips_override=(prev_ally.pips if prev_ally is not None else None),
+            details_checked_at_override=(ally_details_at if prev_ally is not None else ally_details_at),
+            occupied_override=(prev_ally.occupied if prev_ally is not None else None),
+            debug_dump=debug_dump,
+            debug_dump_health=debug_dump_health,
+            debug_dump_empty_names=debug_dump_empty_names,
+            debug_dump_sigil_roi=debug_dump_sigil_roi,
+            debug_dump_school_roi=debug_dump_school_roi,
+            debug_dump_pips=debug_dump_pips,
+            debug_print_health_ocr=debug_print_health_ocr,
+            debug_print_health_ocr_initial_read=debug_print_health_ocr_initial_read,
+            debug_dump_id=debug_dump_id,
+            debug_dump_limit=debug_dump_limit,
+            sigil_override=ally_sigil,
+            sigil_score_override=ally_sigil_score,
+            sigil_checked=True,
+            previous_slot=prev_ally,
         )
+        ally_slot_final = _merge_reactivated_slot(prev_ally, ally_slot)
+        allies.append(ally_slot_final)
+        _log_slot_transition(prev_ally, ally_slot_final)
+        if ally_need_name and ally_slot_final.slot_active and ally_slot_final.occupied and ally_slot_final.name_ocr:
+            _log_name_ocr(ally_slot_final)
 
     state.enemies = enemies
     state.allies = allies
@@ -3625,6 +3795,7 @@ def render_participants_overlay(
     player_slot_side: str = "ally",
     player_slot_locked: bool = False,
     player_slot_sigil: Optional[str] = None,
+    cards_in_hand: Optional[int] = None,
 ) -> np.ndarray:
     vis = frame_bgr.copy()
     aspect_key = _aspect_bucket(frame_bgr.shape[1] / frame_bgr.shape[0]) if frame_bgr.size else "unknown"
@@ -3635,6 +3806,7 @@ def render_participants_overlay(
             aspect_key,
             player_slot_sigil=player_slot_sigil,
             player_slot_locked=player_slot_locked,
+            cards_in_hand=cards_in_hand,
             detailed=legend_detailed,
         )
     for p in state.enemies + state.allies:
@@ -3847,6 +4019,7 @@ def _draw_participants_legend(
     *,
     player_slot_sigil: Optional[str] = None,
     player_slot_locked: bool = False,
+    cards_in_hand: Optional[int] = None,
     detailed: bool = True,
 ) -> None:
     h, w = vis.shape[:2]
@@ -3865,6 +4038,8 @@ def _draw_participants_legend(
             slot_text = cleaned.title()
     player_label = f"Player: {slot_text}"
     player_color = (0, 215, 255) if player_slot_locked else (255, 255, 255)
+    cards_value = "Unknown" if cards_in_hand is None else str(cards_in_hand)
+    cards_label = f"Cards: {cards_value}"
 
     if detailed:
         lines = [
@@ -3875,12 +4050,14 @@ def _draw_participants_legend(
             ("Hp", (0, 255, 0)),
             ("Pips", (255, 255, 0)),
             (player_label, player_color),
+            (cards_label, (255, 255, 255)),
             (init_label, (255, 255, 255)),
             (aspect_label, (200, 200, 200)),
         ]
     else:
         lines = [
             (player_label, player_color),
+            (cards_label, (255, 255, 255)),
             (init_label, (255, 255, 255)),
             (aspect_label, (200, 200, 200)),
         ]
@@ -3927,7 +4104,7 @@ def _draw_box_label(vis: np.ndarray, participant: ParticipantState) -> None:
 
     if empty:
         reason = participant.empty_reason or "unknown"
-        lines = [f"empty: {reason}"]
+        lines = [f"{sigil} | inactive ({reason})"]
     else:
         name = participant.name or "unknown"
         cur = "?" if participant.health_current is None else str(participant.health_current)

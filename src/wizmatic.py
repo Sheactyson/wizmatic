@@ -16,6 +16,7 @@ from config.wizmatic_config import (
     SHOW_PIPDETECTION_OVERLAY,
     SHOW_BUTTON_OVERLAY,
     SHOW_PLAYER_WIZARD_OVERLAY,
+    SHOW_CARD_COUNT_OVERLAY,
     SHOW_MASTER_DEBUG_OVERLAY,
     DEBUG_DUMP_OCR,
     DEBUG_DUMP_OCR_MAX,
@@ -26,10 +27,13 @@ from config.wizmatic_config import (
     DEBUG_DUMP_SCHOOL_ROI,
     DEBUG_DUMP_BUTTON_ROI,
     DEBUG_DUMP_PLAYER_WIZARD_ROI,
+    DEBUG_DUMP_PLAYER_HAND_ROI,
     DEBUG_DUMP_PIP_ROI,
     DEBUG_PRINT_HEALTH_OCR,
     DEBUG_PRINT_NAME_OCR,
     DEBUG_PRINT_STATE_CHANGES,
+    DEBUG_PRINT_SLOT_ACTIVITY,
+    DEBUG_PRINT_CARD_COUNT,
     OCR_BACKEND,
     COMBAT_MODE,
     MASTER_OVERLAY_SHOW_PARTICIPANTS,
@@ -42,7 +46,14 @@ from config.wizmatic_config import (
 )
 from config.participants_config import PARTICIPANTS_CFG
 from state.initiative import render_initiative_boxes, render_initiative_overlay
-from state.participants import render_participants_overlay, render_player_wizard_overlay, pop_health_ocr_logs
+from state.card_count import render_player_hand_overlay, pop_card_count_logs
+from state.participants import (
+    render_participants_overlay,
+    render_player_wizard_overlay,
+    pop_health_ocr_logs,
+    pop_name_ocr_logs,
+    pop_slot_activity_logs,
+)
 _PVP_MODE = str(COMBAT_MODE).strip().lower() == "pvp"
 _RETREAT_STATE_KEY = "concede" if _PVP_MODE else "flee"
 _RETREAT_BUTTON_LABEL = "concede" if _PVP_MODE else "flee"
@@ -251,6 +262,7 @@ def main():
                     debug_dump_sigil_roi=DEBUG_DUMP_SIGIL_ROI,
                     debug_dump_school_roi=DEBUG_DUMP_SCHOOL_ROI,
                     debug_dump_player_wizard_roi=DEBUG_DUMP_PLAYER_WIZARD_ROI,
+                    debug_dump_player_hand_roi=DEBUG_DUMP_PLAYER_HAND_ROI,
                     debug_dump_pip_roi=DEBUG_DUMP_PIP_ROI,
                     debug_print_health_ocr=DEBUG_PRINT_HEALTH_OCR,
                     debug_dump_ocr_id=str(worker_debug_ocr_session_id),
@@ -312,30 +324,6 @@ def main():
                         if state_current == "card_select":
                             if DEBUG_PRINT_STATE_CHANGES:
                                 print("Card Select Mode")
-                            if DEBUG_PRINT_NAME_OCR and game_state.battle.participants:
-                                enemies = game_state.battle.participants.enemies
-                                allies = game_state.battle.participants.allies
-                                for p in enemies + allies:
-                                    if p is None:
-                                        continue
-                                    if not p.name_ocr:
-                                        continue
-                                    raw = p.name_raw if p.name_raw else "unknown"
-                                    final = p.name if p.name else "unknown"
-                                    sigil_label = ((p.sigil or "unknown").strip() or "unknown").title()
-                                    if p.name_time_ms is not None:
-                                        if p.name_time_parts:
-                                            cap_ms, prep_ms, ocr_ms, res_ms = p.name_time_parts
-                                            print(
-                                                f"[ocr:name] {sigil_label}: {raw} -> {final} "
-                                                f"({p.name_time_ms:.1f}ms | capture {cap_ms:.1f}ms "
-                                                f"prep {prep_ms:.1f}ms ocr {ocr_ms:.1f}ms "
-                                                f"resolve {res_ms:.1f}ms)"
-                                            )
-                                        else:
-                                            print(f"[ocr:name] {sigil_label}: {raw} -> {final} ({p.name_time_ms:.1f}ms)")
-                                    else:
-                                        print(f"[ocr:name] {sigil_label}: {raw} -> {final}")
                         else:
                             if DEBUG_PRINT_STATE_CHANGES:
                                 print(f"{_format_state_label(state_current)} Mode")
@@ -368,6 +356,7 @@ def main():
                                 player_slot_side=game_state.battle.player_wizard.side,
                                 player_slot_locked=game_state.battle.player_wizard.slot_locked,
                                 player_slot_sigil=game_state.battle.player_wizard.slot_sigil,
+                                cards_in_hand=game_state.battle.player_hand.cards_in_hand,
                             )
                         if MASTER_OVERLAY_SHOW_INITIATIVE:
                             master = render_initiative_boxes(master, INITIATIVE_CFG, game_state.battle.initiative)
@@ -414,9 +403,28 @@ def main():
                             in_battle=in_battle,
                         ),
                     )
+                if SHOW_CARD_COUNT_OVERLAY:
+                    in_battle = state_current in {"battle", "card_select", "round_animation"}
+                    if in_battle:
+                        _safe_imshow(
+                            "wizmatic:card_count",
+                            render_player_hand_overlay(
+                                render_base,
+                                game_state.battle.player_hand,
+                            ),
+                        )
 
-            if DEBUG_PRINT_HEALTH_OCR:
-                for line in pop_health_ocr_logs():
+            name_logs = pop_name_ocr_logs() if DEBUG_PRINT_NAME_OCR else []
+            health_logs = pop_health_ocr_logs() if DEBUG_PRINT_HEALTH_OCR else []
+            for line in name_logs:
+                print(line)
+            for line in health_logs:
+                print(line)
+            if DEBUG_PRINT_SLOT_ACTIVITY:
+                for line in pop_slot_activity_logs():
+                    print(line)
+            if DEBUG_PRINT_CARD_COUNT:
+                for line in pop_card_count_logs():
                     print(line)
 
             if SHOW_CAPTURE and (not SHOW_MASTER_DEBUG_OVERLAY) and latest_capture_frame is not None:

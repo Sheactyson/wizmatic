@@ -3,6 +3,7 @@ from typing import Dict, Tuple, Optional
 
 from state.initiative import RingProfile
 from state.participants import ParticipantBoxProfile, ParticipantLayout, PlayerHUDProfile
+from state.card_count import CardCountProfile, CardCountConfig
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,58 @@ PLAYER_HUD_PROFILES: Dict[str, PlayerHUDProfile] = {
         energy_roi=(0.03, 0.908, 0.058, 0.942),
     ),
 }
+
+
+# Player hand card-count-slot detection.
+# The card count slot marker appears just left of the visible cards and shifts right
+# as card count decreases. `centers_by_count` maps expected center points for
+# each hand size (0..7) in frame pixel coordinates.
+CARD_COUNT_CFG = CardCountConfig(
+    profiles={
+        "4:3": CardCountProfile(
+            slot_rel_roi=(0.1642, 0.4167, 0.5441, 0.5858),
+            centers_by_count={
+                7: (199, 324),
+                6: (239, 324),
+                5: (279, 324),
+                4: (320, 324),
+                3: (359, 324),
+                2: (400, 324),
+                1: (440, 324),
+                0: (481, 324),
+            },
+        ),
+        "16:9": CardCountProfile(
+            slot_rel_roi=(0.2549, 0.4191, 0.5343, 0.5809),
+            centers_by_count={
+                7: (365, 324),
+                6: (405, 324),
+                5: (443, 324),
+                4: (483, 324),
+                3: (522, 324),
+                2: (562, 324),
+                1: (600, 324),
+                0: (640, 324),
+            },
+        ),
+        "43:18": CardCountProfile(
+            slot_rel_roi=(0.3162, 0.4191, 0.5294, 0.5809),
+            centers_by_count={
+                7: (436, 241),
+                6: (466, 241),
+                5: (494, 241),
+                4: (524, 241),
+                3: (553, 241),
+                2: (582, 241),
+                1: (611, 241),
+                0: (641, 241),
+            },
+        ),
+    },
+    templates_base_dir="src/assets/player_hand/card_count_slot",
+    template_threshold=0.5,
+    center_match_max_dist_px=1,
+)
 
 
 # Pip-slot slicing debug tuning.
